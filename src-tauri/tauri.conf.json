@@ -1,0 +1,80 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Assistant Panel",
+  "version": "0.1.1",
+  "identifier": "com.administrator.assistant-panel",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Assistant Panel",
+        "width": 420,
+        "height": 800,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "resizable": true,
+        "maximizable": false,
+        "visible": true,
+        "skipTaskbar": true
+      },
+      {
+        "label": "floating",
+        "title": "Floating Panel",
+        "width": 420,
+        "height": 800,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "resizable": true,
+        "maximizable": false,
+        "visible": false,
+        "skipTaskbar": true
+      },
+      {
+        "label": "close-btn",
+        "title": "",
+        "width": 32,
+        "height": 32,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "resizable": false,
+        "visible": false,
+        "skipTaskbar": true
+      },
+      {
+        "label": "alert",
+        "title": "",
+        "width": 320,
+        "height": 200,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "resizable": false,
+        "visible": false,
+        "skipTaskbar": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
