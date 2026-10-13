@@ -3,6 +3,18 @@ import type { PanelPlugin } from "./types";
 
 export const pluginRegistry: PanelPlugin[] = [
   {
+    id: "network-traffic",
+    name: "网络流量",
+    description: "网络接口速度与累计流量",
+    icon: "Network",
+    category: "network",
+    compactView: defineAsyncComponent(
+      () => import("./network-traffic/Compact.vue")
+    ),
+    order: 1.5,
+    enabled: true,
+  },
+  {
     id: "port-forward",
     name: "端口转发",
     description: "TCP/UDP 端口转发",

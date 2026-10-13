@@ -2,6 +2,7 @@ mod commands;
 mod logger;
 mod modules;
 mod state;
+mod startup_diagnostics;
 
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
@@ -14,7 +15,9 @@ static PIN_SHORTCUT: Mutex<Option<Shortcut>> = Mutex::new(None);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    startup_diagnostics::init();
+    startup_diagnostics::record("run entered; Tauri builder/build begin");
+    let application = tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
@@ -37,11 +40,16 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            startup_diagnostics::record("setup entered; ordinary logger begin");
             let log = logger::Logger::new(app.handle());
             log.system("INFO", "Application starting");
+            startup_diagnostics::record("ordinary logger initialized; settings read begin");
 
             // Read saved panel width (logical px, falls back to 420).
             let panel_width_logical: f64 = tauri_plugin_store::StoreBuilder::new(app.handle(), "settings.json")
+                // Explicit saves allow network pin/migration cache rollback without
+                // a delayed autosave committing an unconfirmed mutation.
+                .disable_auto_save()
                 .build()
                 .ok()
                 .and_then(|s| s.get("panel.width").and_then(|v| v.as_u64()))
@@ -54,6 +62,50 @@ pub fn run() {
                 .and_then(|s| s.get("panel.alwaysOnTop").and_then(|v| v.as_bool()))
                 .unwrap_or(true);
 
+            startup_diagnostics::record("panel settings read completed; plugin settings read begin");
+            // Load settings from store (with fallback defaults)
+            let store_result = tauri_plugin_store::StoreBuilder::new(app.handle(), "settings.json").build();
+
+            let mut panel_hotkey_str = "Control+Shift+Backquote".to_string();
+            let mut pin_hotkey_str = "Control+Alt+Backquote".to_string();
+            let mut pin_enabled = true;
+            // Per-host disabled plugin ids (settings key `plugins.disabled`).
+            let mut disabled_plugins: Vec<String> = Vec::new();
+
+            if let Ok(store) = store_result {
+                if let Some(v) = store.get("panel.hotkey").and_then(|v| v.as_str().map(|s| s.to_string())) {
+                    panel_hotkey_str = v;
+                }
+                if let Some(v) = store.get("windowPin.hotkey").and_then(|v| v.as_str().map(|s| s.to_string())) {
+                    pin_hotkey_str = v;
+                }
+                if let Some(v) = store.get("windowPin.enabled").and_then(|v| v.as_bool()) {
+                    pin_enabled = v;
+                }
+                if let Some(v) = store.get("plugins.disabled") {
+                    if let Ok(list) = serde_json::from_value::<Vec<String>>(v) {
+                        disabled_plugins = list;
+                    }
+                }
+            }
+
+            startup_diagnostics::record("plugin settings read completed; shortcut setup begin");
+            let plugin_enabled = |id: &str| !disabled_plugins.iter().any(|d| d == id);
+
+            // window-pin disabled -> force pin off and skip its hotkey registration.
+            if !plugin_enabled("window-pin") {
+                pin_enabled = false;
+            }
+
+            startup_diagnostics::record("shared state registration begin");
+            app.manage(state::AppState::new(log.clone(), pin_enabled));
+            let network_settings = commands::network_traffic::load_settings(app.handle());
+            app.manage(modules::network_monitor::NetworkTrafficState::from_settings(
+                plugin_enabled("network-traffic"), network_settings,
+            ));
+            startup_diagnostics::record("shared states registered before window show and shortcut setup");
+
+            startup_diagnostics::record("settings read completed; window layout begin");
             // Dock the panel to the outermost right display.  Using the primary
             // display here would put a hidden panel into the adjacent display
             // after it slides out, causing Windows to apply that display's DPI
@@ -85,39 +137,7 @@ pub fn run() {
                 alert_win.hide().ok();
             }
 
-            // Load settings from store (with fallback defaults)
-            let store_result = tauri_plugin_store::StoreBuilder::new(app.handle(), "settings.json").build();
-
-            let mut panel_hotkey_str = "Control+Shift+Backquote".to_string();
-            let mut pin_hotkey_str = "Control+Alt+Backquote".to_string();
-            let mut pin_enabled = true;
-            // Per-host disabled plugin ids (settings key `plugins.disabled`).
-            let mut disabled_plugins: Vec<String> = Vec::new();
-
-            if let Ok(store) = store_result {
-                if let Some(v) = store.get("panel.hotkey").and_then(|v| v.as_str().map(|s| s.to_string())) {
-                    panel_hotkey_str = v;
-                }
-                if let Some(v) = store.get("windowPin.hotkey").and_then(|v| v.as_str().map(|s| s.to_string())) {
-                    pin_hotkey_str = v;
-                }
-                if let Some(v) = store.get("windowPin.enabled").and_then(|v| v.as_bool()) {
-                    pin_enabled = v;
-                }
-                if let Some(v) = store.get("plugins.disabled") {
-                    if let Ok(list) = serde_json::from_value::<Vec<String>>(v) {
-                        disabled_plugins = list;
-                    }
-                }
-            }
-
-            let plugin_enabled = |id: &str| !disabled_plugins.iter().any(|d| d == id);
-
-            // window-pin disabled -> force pin off and skip its hotkey registration.
-            if !plugin_enabled("window-pin") {
-                pin_enabled = false;
-            }
-
+            startup_diagnostics::record("window layout completed; shortcut setup begin");
             // Persist loaded PIN_ENABLED into global AtomicBool
             commands::window_pin::PIN_ENABLED.store(pin_enabled, std::sync::atomic::Ordering::Relaxed);
 
@@ -150,6 +170,7 @@ pub fn run() {
             log.system("INFO", &format!("Pin hotkey: {} (enabled: {})", pin_hotkey_str, pin_enabled));
 
             // Register global shortcuts — handler reads current shortcuts from globals
+            startup_diagnostics::record("global-shortcut plugin registration begin");
             app.handle()
                 .plugin(
                     tauri_plugin_global_shortcut::Builder::new()
@@ -171,9 +192,17 @@ pub fn run() {
                             }
                         })
                         .build(),
-                )?;
+                ).map_err(|error| {
+                    startup_diagnostics::record(&format!("global-shortcut plugin registration failed: {error}"));
+                    error
+                })?;
 
-            app.global_shortcut().register(panel_shortcut)?;
+            startup_diagnostics::record("global-shortcut plugin ready; main shortcut registration begin");
+            app.global_shortcut().register(panel_shortcut).map_err(|error| {
+                startup_diagnostics::record(&format!("main shortcut registration failed: {error}"));
+                error
+            })?;
+            startup_diagnostics::record("main shortcut registration completed");
             // Only register the window-pin hotkey when that plugin is enabled.
             if plugin_enabled("window-pin") {
                 if let Err(e) = app.global_shortcut().register(pin_shortcut) {
@@ -183,12 +212,11 @@ pub fn run() {
                 log.system("INFO", "Plugin window-pin disabled; skipping pin hotkey");
             }
 
+            startup_diagnostics::record("shortcut setup completed; background monitors begin");
             log.system("INFO", "Application ready");
-            let app_state = state::AppState::new(log, pin_enabled);
-            // Register state before restoring processes. Startup monitor threads
-            // use `app.try_state()` immediately after a process is spawned.
-            app.manage(app_state);
+            modules::network_monitor::start_monitor(app.handle().clone());
 
+            startup_diagnostics::record("network monitor started; process restore begin");
             // Restore process definitions and auto-start (skip if plugin disabled).
             if plugin_enabled("process-manager") {
                 let app_handle = app.handle().clone();
@@ -197,14 +225,20 @@ pub fn run() {
                 modules::process_manager::startup_auto_processes(&app_handle, app_state.inner());
             }
 
+            startup_diagnostics::record("process restore completed; gold monitor begin");
             // Start background gold-price monitor (skip if API dashboard disabled).
             if plugin_enabled("api-dashboard") {
                 modules::gold_monitor::start_monitor(app.handle().clone());
             }
 
+            startup_diagnostics::record("gold monitor startup completed; setup completed");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::network_traffic::get_network_traffic_snapshot,
+            commands::network_traffic::pin_network_traffic_interface,
+            commands::network_traffic::set_network_traffic_highlight,
+            commands::network_traffic::set_network_traffic_enabled,
             commands::panel::toggle_panel,
             commands::panel::show_panel,
             commands::panel::hide_panel,
@@ -251,6 +285,21 @@ pub fn run() {
             commands::process::get_process_output,
             commands::process::clear_process_output,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!());
+    let application = match application {
+        Ok(application) => application,
+        Err(error) => {
+            startup_diagnostics::record(&format!("Tauri build failed: {error}"));
+            panic!("error while building tauri application");
+        }
+    };
+    startup_diagnostics::record("Tauri build completed; event loop begin");
+    application.run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                startup_diagnostics::record("event loop exit");
+                if let Some(state) = app.try_state::<modules::network_monitor::NetworkTrafficState>() {
+                    state.shutdown();
+                }
+            }
+        });
 }

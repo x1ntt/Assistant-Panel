@@ -2,7 +2,7 @@
 import { usePanelStore } from "@/stores/panel";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted } from "vue";
 import PanelHeader from "./PanelHeader.vue";
 import ToolList from "./ToolList.vue";
 import BottomBar from "./BottomBar.vue";
@@ -11,7 +11,10 @@ import CloseButton from "./CloseButton.vue";
 import AlertWindow from "./AlertWindow.vue";
 
 const panel = usePanelStore();
-const windowType = ref<"main" | "floating" | "close-btn" | "alert">("main");
+// Resolve before the first render: auxiliary webviews must never mount main plugins.
+const label = getCurrentWebview().label;
+const windowType: "main" | "floating" | "close-btn" | "alert" =
+  label === "floating" || label === "close-btn" || label === "alert" ? label : "main";
 
 function onMainKeydown(e: KeyboardEvent) {
   // Block webview refresh (F5 / Ctrl+R / Ctrl+Shift+R). This is a desktop app,
@@ -30,15 +33,7 @@ function onMainKeydown(e: KeyboardEvent) {
 }
 
 onMounted(async () => {
-  const label = getCurrentWebview().label;
-  if (label === "floating") {
-    windowType.value = "floating";
-  } else if (label === "close-btn") {
-    windowType.value = "close-btn";
-  } else if (label === "alert") {
-    windowType.value = "alert";
-  } else {
-    windowType.value = "main";
+  if (windowType === "main") {
     await panel.init();
     await listen("hotkey:toggle", () => {
       panel.toggle();

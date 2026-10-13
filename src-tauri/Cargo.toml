@@ -38,6 +38,8 @@ windows = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Accessibility",
   "Win32_Foundation",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
   "Win32_Graphics_Dwm",
   "Win32_Security",
   "Win32_System_Console",

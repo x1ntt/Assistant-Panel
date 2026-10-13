@@ -404,11 +404,17 @@ pub fn read_theme(app: AppHandle) -> Result<String, String> {
 /// Exit the application completely
 #[tauri::command]
 pub fn exit_app(app: AppHandle) {
+    if let Some(state) = app.try_state::<crate::modules::network_monitor::NetworkTrafficState>() {
+        state.shutdown();
+    }
     app.exit(0);
 }
 
 /// Restart the application.
 #[tauri::command]
 pub fn restart_app(app: AppHandle) {
+    if let Some(state) = app.try_state::<crate::modules::network_monitor::NetworkTrafficState>() {
+        state.shutdown();
+    }
     app.restart();
 }

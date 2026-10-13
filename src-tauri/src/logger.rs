@@ -19,8 +19,20 @@ impl Logger {
             .path()
             .app_log_dir()
             .unwrap_or_else(|_| PathBuf::from("./logs"));
-        let log_dir = log_base.join(&timestamp);
-        fs::create_dir_all(&log_dir).ok();
+        let mut log_dir = log_base.join(&timestamp);
+        let probe = |path: &std::path::Path| -> std::io::Result<()> {
+            fs::create_dir_all(path)?;
+            OpenOptions::new().create(true).append(true).open(path.join("system.log"))?;
+            Ok(())
+        };
+        if let Err(error) = probe(&log_dir) {
+            crate::startup_diagnostics::record(&format!("ordinary log initialization failed: {error}"));
+            log_dir = std::env::temp_dir().join("assistant-panel-logs").join(&timestamp);
+            if let Err(error) = probe(&log_dir) {
+                crate::startup_diagnostics::record(&format!("ordinary log fallback failed: {error}"));
+            }
+        }
+        crate::startup_diagnostics::record(&format!("ordinary log directory={}", log_dir.display()));
         Self {
             log_dir: Arc::new(log_dir),
         }
@@ -40,12 +52,17 @@ impl Logger {
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
         let line = format!("[{}] [{}] [{}] {}\n", timestamp, level, source, message);
         let log_file = self.log_dir.join(format!("{}.log", source));
-        if let Ok(mut file) = OpenOptions::new()
+        match OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_file)
         {
-            file.write_all(line.as_bytes()).ok();
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(line.as_bytes()) {
+                    crate::startup_diagnostics::record(&format!("ordinary log write failed: {error}"));
+                }
+            }
+            Err(error) => crate::startup_diagnostics::record(&format!("ordinary log open failed: {error}")),
         }
     }
 }

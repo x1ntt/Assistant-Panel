@@ -1,5 +1,6 @@
 pub mod alert;
 pub mod log;
+pub mod network_traffic;
 pub mod panel;
 pub mod port_forward;
 pub mod process;

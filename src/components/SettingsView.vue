@@ -17,6 +17,7 @@ import { useTauriCommand } from "@/composables/useTauriCommand";
 import HotkeyInput from "@/components/HotkeyInput.vue";
 import { pluginRegistry } from "@/plugins/registry";
 import { toast } from "vue-sonner";
+import type { Snapshot } from "@/plugins/network-traffic/types";
 
 interface Settings {
   hotkey: string;
@@ -41,6 +42,7 @@ const currentTheme = ref("light");
 const DISABLED_KEY = "plugins.disabled";
 const pluginStore = new LazyStore("settings.json");
 const disabledPlugins = ref<string[]>([]);
+const networkTrafficPending = ref(false);
 // Plugins whose backend work only fully stops after a restart.
 const RESTART_HINT_IDS = new Set(["api-dashboard", "process-manager", "window-pin"]);
 
@@ -49,6 +51,10 @@ function isPluginEnabled(id: string): boolean {
 }
 
 async function togglePlugin(id: string, enabled: boolean) {
+  if (id === "network-traffic") {
+    await toggleNetworkTraffic(enabled);
+    return;
+  }
   const set = new Set(disabledPlugins.value);
   if (enabled) set.delete(id);
   else set.add(id);
@@ -57,6 +63,57 @@ async function togglePlugin(id: string, enabled: boolean) {
   await pluginStore.save();
   // Refresh the main panel list immediately (UI). Backend stops on next launch.
   await emit("plugins:changed");
+}
+
+async function toggleNetworkTraffic(enabled: boolean) {
+  if (networkTrafficPending.value) return;
+  networkTrafficPending.value = true;
+  const previousSetting = isPluginEnabled("network-traffic");
+  let previousRuntime: boolean | undefined;
+  let attempted = false;
+  function updateSetting(value: boolean) {
+    const set = new Set(disabledPlugins.value);
+    if (value) set.delete("network-traffic");
+    else set.add("network-traffic");
+    disabledPlugins.value = Array.from(set);
+  }
+  try {
+    const currentRuntime = await invoke<Snapshot>("get_network_traffic_snapshot");
+    // A failed Store load may leave an empty shared cache. Do not save it over
+    // the original settings, including through the rollback path below.
+    if (currentRuntime.configError) throw new Error(currentRuntime.configError);
+    previousRuntime = currentRuntime.enabled;
+    attempted = true;
+    const result = await invoke<Snapshot>("set_network_traffic_enabled", { enabled });
+    if (result.enabled !== enabled) throw new Error("后端未确认监控状态");
+    updateSetting(result.enabled);
+    await pluginStore.set(DISABLED_KEY, disabledPlugins.value);
+    await pluginStore.save();
+    await emit("plugins:changed");
+  } catch (e) {
+    const rollbackErrors: string[] = [];
+    if (attempted && previousRuntime !== undefined) {
+      try {
+        const restored = await invoke<Snapshot>("set_network_traffic_enabled", { enabled: previousRuntime });
+        if (restored.enabled !== previousRuntime) throw new Error("后端未确认恢复状态");
+      } catch (restoreError) { rollbackErrors.push("运行状态恢复失败：" + String(restoreError)); }
+    }
+    updateSetting(previousSetting);
+    if (attempted) {
+      try {
+        await pluginStore.set(DISABLED_KEY, disabledPlugins.value);
+        await pluginStore.save();
+      } catch (restoreError) { rollbackErrors.push("设置恢复失败：" + String(restoreError)); }
+      try { await emit("plugins:changed"); }
+      catch (restoreError) { rollbackErrors.push("面板刷新失败：" + String(restoreError)); }
+    }
+    toast.error("网络流量设置失败", {
+      description: [String(e), ...rollbackErrors].join("；"),
+      position: "top-center",
+    });
+  } finally {
+    networkTrafficPending.value = false;
+  }
 }
 
 onMounted(async () => {
@@ -200,6 +257,7 @@ async function setTheme(theme: string) {
           </div>
           <Switch
             :model-value="isPluginEnabled(p.id)"
+            :disabled="p.id === 'network-traffic' && networkTrafficPending"
             @update:model-value="togglePlugin(p.id, $event)"
           />
         </div>

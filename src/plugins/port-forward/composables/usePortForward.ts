@@ -2,6 +2,7 @@ import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LazyStore } from "@tauri-apps/plugin-store";
+import { formatBytes, formatSpeed } from "@/lib/network-format";
 
 export interface ForwardRule {
   id: string;
@@ -203,19 +204,6 @@ export function usePortForward() {
   function toggleEdit(id: string) {
     const rule = rules.value.find((r) => r.id === id);
     if (rule) rule.editing = !rule.editing;
-  }
-
-  function formatBytes(bytes: number): string {
-    if (bytes === 0) return "0";
-    if (bytes < 1024) return bytes + "B";
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + "K";
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + "M";
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + "G";
-  }
-
-  function formatSpeed(bytesPerSec: number): string {
-    if (bytesPerSec === 0) return "0";
-    return formatBytes(bytesPerSec) + "/s";
   }
 
   onMounted(async () => {
