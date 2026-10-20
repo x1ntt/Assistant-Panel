@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Assistant Panel",
         "width": 420,
         "height": 800,
@@ -26,6 +27,7 @@
       },
       {
         "label": "floating",
+        "create": false,
         "title": "Floating Panel",
         "width": 420,
         "height": 800,
@@ -39,6 +41,7 @@
       },
       {
         "label": "close-btn",
+        "create": false,
         "title": "",
         "width": 32,
         "height": 32,
@@ -51,6 +54,7 @@
       },
       {
         "label": "alert",
+        "create": false,
         "title": "",
         "width": 320,
         "height": 200,

@@ -53,6 +53,14 @@ pnpm tauri build
 
 Tauri 开发模式通过 `beforeDevCommand` 启动 Vite（端口 1420）。正式构建先执行 `pnpm build`（`vue-tsc --noEmit` + Vite），将前端写入 `dist/`，再编译 Rust 并生成安装包。默认 Rust 产物在 `src-tauri/target/`，安装包在 `src-tauri/target/release/bundle/`；这些产物不纳入 Git。
 
+## 端口转发规则恢复
+
+规则保存在应用数据目录的 `settings.json`，键为 `port-forward.rules`。重启后即使端口被占用或监听 IP 不可用，规则仍保留在列表中，显示“启动失败”和原因，可点击播放按钮重试；暂停规则保持暂停。
+
+加载完成前禁止修改规则；配置文件损坏或读取失败时显示错误并允许重试，不以空列表覆盖配置。保存失败时显示“规则未保存”，保留当前运行状态并提供“重试保存”；成功保存前禁止继续修改，避免重复新增或覆盖待保存的更改。未保存的更改在退出应用后可能丢失。
+
+端口转发回归测试：`node --test src/plugins/port-forward/composables/usePortForward.test.mjs`；配置解析测试：`cargo test --manifest-path src-tauri/Cargo.toml commands::port_forward::tests`。
+
 ## 网络流量
 
 “网络流量”作为独立插件显示，表格为接口、速度、流量、操作。速度和流量均以 `↑` 发送、`↓` 接收，上下两行展示，格式与端口转发一致。
@@ -115,7 +123,7 @@ assistant-panel/
 
 ## 启动诊断
 
-启动时先注册共享状态再显示窗口；网络 IPC 在状态尚未就绪时返回可重试错误，不触发 panic。辅助窗口在首次渲染前识别类型，避免误加载主面板插件。诊断日志会保留 Tauri“state() called before manage()”错误中的状态类型，其他动态 panic 内容仍省略。该修复消除了已识别的启动竞态，目标机故障是否由此引起需新版运行结果确认。
+所有窗口在配置中设置 `create: false`，由 `setup()` 注册共享状态后再创建 WebView，避免首次 IPC 早于 `AppState` 注册而出现“State not managed”；仅延迟显示窗口不足以阻止 WebView 提前加载。网络 IPC 在状态尚未就绪时返回可重试错误，不触发 panic。辅助窗口在首次渲染前识别类型，避免误加载主面板插件。诊断日志会保留 Tauri“state() called before manage()”错误中的状态类型，其他动态 panic 内容仍省略。目标机启动故障是否完全消除仍需新版运行结果确认。
 
 诊断版在 Tauri 初始化前写启动阶段和 Rust panic 日志，不依赖网络或前端成功加载。若另一台电脑启动卡死后退出，关闭旧实例、安装诊断版并启动一次，然后用 Win+R 打开：
 

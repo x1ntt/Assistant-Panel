@@ -1,6 +1,52 @@
 use crate::modules::port_forwarder;
 use crate::state::{AppState, ForwardRuleSnapshot, InterfaceInfo, NewRule};
-use tauri::{AppHandle, State};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, State};
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SavedForwardRule {
+    #[serde(flatten)]
+    rule: NewRule,
+    #[serde(default)]
+    paused: bool,
+}
+
+fn parse_saved_rules(bytes: &[u8]) -> Result<Vec<SavedForwardRule>, String> {
+    let settings: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(bytes).map_err(|error| format!("配置文件无效: {error}"))?;
+    let Some(value) = settings.get("port-forward.rules") else {
+        return Ok(Vec::new());
+    };
+    let rules: Vec<SavedForwardRule> = serde_json::from_value(value.clone())
+        .map_err(|error| format!("转发规则配置无效: {error}"))?;
+    for saved in &rules {
+        if saved.rule.listen_addr.trim().is_empty()
+            || saved.rule.target_addr.trim().is_empty()
+            || saved.rule.listen_port == 0
+            || saved.rule.target_port == 0
+            || !matches!(saved.rule.protocol.as_str(), "tcp" | "udp" | "both")
+        {
+            return Err("转发规则配置无效: 地址、端口或协议无效".into());
+        }
+    }
+    Ok(rules)
+}
+
+#[tauri::command]
+pub fn get_saved_forward_rules(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<SavedForwardRule>, String> {
+    let result = (|| {
+        let path = app.path().app_data_dir().map_err(|error| error.to_string())?.join("settings.json");
+        match std::fs::read(path) {
+            Ok(bytes) => parse_saved_rules(&bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(format!("读取转发规则失败: {error}")),
+        }
+    })();
+    if let Err(error) = &result {
+        state.logger.plugin("port-forward", "ERROR", error);
+    }
+    result
+}
 
 #[tauri::command]
 pub async fn get_interfaces() -> Result<Vec<InterfaceInfo>, String> {
@@ -31,7 +77,10 @@ pub async fn get_interfaces() -> Result<Vec<InterfaceInfo>, String> {
 
 #[tauri::command]
 pub fn add_forward_rule(app: AppHandle, rule: NewRule, state: State<'_, AppState>) -> Result<ForwardRuleSnapshot, String> {
-    let id = port_forwarder::start_tcp_sync(rule.clone(), app, &state)?;
+    let id = port_forwarder::start_tcp_sync(rule.clone(), app, &state).map_err(|error| {
+        state.logger.plugin("port-forward", "ERROR", &format!("规则启动失败: {error}"));
+        error
+    })?;
 
     state.logger.plugin("port-forward", "INFO",
         &format!("规则添加: {}:{} -> {}:{} [{}]",
@@ -121,4 +170,37 @@ pub fn disconnect_rule_connection(
 #[tauri::command]
 pub fn get_forward_rules(state: State<'_, AppState>) -> Vec<ForwardRuleSnapshot> {
     port_forwarder::get_snapshots(&state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_saved_rules;
+
+    #[test]
+    fn accepts_legacy_rules_and_preserves_paused_state() {
+        let rules = parse_saved_rules(br#"{"port-forward.rules":[
+            {"listenAddr":"0.0.0.0","listenPort":8080,"targetAddr":"localhost","targetPort":80,"protocol":"tcp"},
+            {"listenAddr":"127.0.0.1","listenPort":8081,"targetAddr":"localhost","targetPort":80,"protocol":"tcp","paused":true}
+        ]}"#).unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(!rules[0].paused);
+        assert!(rules[1].paused);
+    }
+
+    #[test]
+    fn only_missing_rules_are_treated_as_empty() {
+        assert!(parse_saved_rules(br#"{}"#).unwrap().is_empty());
+        for bytes in [b"{".as_slice(), b"[]", br#"{"port-forward.rules":null}"#,
+            br#"{"port-forward.rules":[{}]}"#] {
+            assert!(parse_saved_rules(bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_ports_and_paused_types() {
+        for extra in [r#""listenPort":0"#, r#""listenPort":65536"#, r#""listenPort":8080,"paused":"true""#] {
+            let json = format!(r#"{{"port-forward.rules":[{{"listenAddr":"0.0.0.0",{extra},"targetAddr":"localhost","targetPort":80,"protocol":"tcp"}}]}}"#);
+            assert!(parse_saved_rules(json.as_bytes()).is_err());
+        }
+    }
 }

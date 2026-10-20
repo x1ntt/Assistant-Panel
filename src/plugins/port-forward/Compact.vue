@@ -13,8 +13,11 @@ import { CardHeaderKey } from "@/composables/cardHeader";
 const {
   rules, interfaces, addRule, removeRule, disconnect,
   pauseRule, resumeRule,
+  loading, ready, busy, loadError, saveError, operationError,
+  restoreRules, retrySave,
   toggleExpand, toggleEdit, formatBytes, formatSpeed,
 } = usePortForward();
+const canModify = computed(() => ready.value && !loading.value && !busy.value && !saveError.value);
 
 // Push count + add action into the shared card title bar.
 const count = computed(() => rules.value.length);
@@ -30,6 +33,7 @@ const newRule = ref({
 const addError = ref("");
 
 function openAddRow() {
+  if (!canModify.value) return;
   showAddRow.value = true;
   newRule.value = { listenAddr: "0.0.0.0", listenPort: 0, targetAddr: "", targetPort: 0, protocol: "tcp" };
   addError.value = "";
@@ -52,8 +56,7 @@ async function confirmAdd() {
     addError.value = "请填写完整"; return;
   }
   try {
-    await addRule(newRule.value);
-    showAddRow.value = false;
+    if (await addRule(newRule.value)) showAddRow.value = false;
   } catch (e) { addError.value = String(e); }
 }
 
@@ -83,6 +86,17 @@ function protoLabel(p: string) {
 
 <template>
   <div class="w-full overflow-hidden">
+    <div v-if="loading" class="py-1 text-[9px] text-muted-foreground" role="status">正在恢复转发规则…</div>
+    <div v-if="loadError" class="py-1 text-[9px] text-destructive" role="alert">
+      {{ loadError }}
+      <Button variant="ghost" class="h-5 px-1 text-[9px]" :disabled="loading" @click="restoreRules">重试加载</Button>
+    </div>
+    <div v-if="saveError" class="py-1 text-[9px] text-destructive" role="alert">
+      {{ saveError }}
+      <Button variant="ghost" class="h-5 px-1 text-[9px]" :disabled="busy" @click="retrySave">重试保存</Button>
+    </div>
+    <div v-if="operationError" class="py-1 text-[9px] text-destructive" role="alert">{{ operationError }}</div>
+    <fieldset :disabled="!canModify" class="min-w-0 border-0 p-0 m-0">
     <div class="overflow-x-auto">
       <table class="w-full text-[9px] border-collapse">
         <thead>
@@ -111,7 +125,8 @@ function protoLabel(p: string) {
                 <span :class="rule.paused ? 'text-muted-foreground' : ''">{{ rule.connectionCount }}</span>
               </td>
               <td class="px-1 py-0.5 text-center">
-                <div v-if="rule.paused" class="text-muted-foreground">已暂停</div>
+                <div v-if="rule.error" class="text-destructive">启动失败</div>
+                <div v-else-if="rule.paused" class="text-muted-foreground">已暂停</div>
                 <div v-else class="leading-tight">
                   <div>↑{{ formatSpeed(rule.speedOut) }}</div>
                   <div>↓{{ formatSpeed(rule.speedIn) }}</div>
@@ -129,7 +144,8 @@ function protoLabel(p: string) {
                     <ChevronDown v-if="rule.expanded" class="h-2.5 w-2.5" />
                     <ChevronRight v-else class="h-2.5 w-2.5" />
                   </Button>
-                  <Button v-if="rule.paused" variant="ghost" size="icon" class="h-4 w-4 text-primary"
+                  <Button v-if="!rule.running" variant="ghost" size="icon" class="h-4 w-4 text-primary"
+                    :title="rule.error ? '重试启动' : '恢复转发'" :aria-label="rule.error ? '重试启动' : '恢复转发'"
                     @click="resumeRule(rule.id)">
                     <Play class="h-2.5 w-2.5" />
                   </Button>
@@ -179,6 +195,10 @@ function protoLabel(p: string) {
               </td>
             </tr>
 
+            <tr v-if="rule.error" class="bg-destructive/10">
+              <td colspan="8" class="px-1 py-0.5 text-[9px] text-destructive" role="alert">{{ rule.error }}</td>
+            </tr>
+
             <!-- Expanded: connection sub-rows -->
             <template v-if="rule.expanded && !rule.editing && !rule.paused && rule.connections.length > 0">
               <tr v-for="conn in rule.connections" :key="conn.clientAddr"
@@ -206,7 +226,7 @@ function protoLabel(p: string) {
                 </td>
               </tr>
             </template>
-            <template v-else-if="rule.expanded && !rule.editing && !rule.paused">
+            <template v-else-if="rule.expanded && !rule.editing && rule.running">
               <tr class="bg-muted/30 border-b border-border/30">
                 <td colspan="8" class="px-1 py-0.5 text-center text-muted-foreground">暂无连接</td>
               </tr>
@@ -249,11 +269,12 @@ function protoLabel(p: string) {
           <tr v-if="addError" class="bg-destructive/10">
             <td colspan="8" class="px-1 py-0.5 text-destructive text-[8px] text-center">{{ addError }}</td>
           </tr>
-          <tr v-if="rules.length === 0 && !showAddRow">
+          <tr v-if="ready && rules.length === 0 && !showAddRow">
             <td colspan="8" class="px-1 py-2 text-center text-muted-foreground text-[9px]">暂无转发规则</td>
           </tr>
         </tbody>
       </table>
     </div>
+    </fieldset>
   </div>
 </template>

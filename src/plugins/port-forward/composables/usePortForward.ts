@@ -21,6 +21,7 @@ export interface ForwardRule {
   expanded?: boolean;
   editing?: boolean;
   paused?: boolean;
+  error?: string;
 }
 
 export interface ConnectionInfo {
@@ -50,7 +51,14 @@ const STORE_KEY = "port-forward.rules";
 export function usePortForward() {
   const rules = ref<ForwardRule[]>([]);
   const interfaces = ref<InterfaceInfo[]>([]);
+  const loading = ref(true);
+  const ready = ref(false);
+  const busy = ref(false);
+  const loadError = ref("");
+  const saveError = ref("");
+  const operationError = ref("");
   let unlisten: UnlistenFn | null = null;
+  let restoring = false;
   const store = new LazyStore("settings.json");
 
   async function loadInterfaces() {
@@ -61,126 +69,153 @@ export function usePortForward() {
     }
   }
 
-  async function saveRules() {
-    const saved: SavedRule[] = rules.value.map(r => ({
-      listenAddr: r.listenAddr, listenPort: r.listenPort,
-      targetAddr: r.targetAddr, targetPort: r.targetPort,
-      protocol: r.protocol, paused: r.paused,
-    }));
-    await store.set(STORE_KEY, saved);
-    await store.save();
+  async function saveRules(): Promise<boolean> {
+    try {
+      await invoke<SavedRule[]>("get_saved_forward_rules");
+      const saved: SavedRule[] = rules.value.map(rule => ({
+        listenAddr: rule.listenAddr, listenPort: rule.listenPort,
+        targetAddr: rule.targetAddr, targetPort: rule.targetPort,
+        protocol: rule.protocol, paused: rule.paused,
+      }));
+      await store.set(STORE_KEY, saved);
+      await store.save();
+      saveError.value = "";
+      return true;
+    } catch (error) {
+      saveError.value = `规则未保存，重启可能丢失本次更改: ${String(error)}`;
+      return false;
+    }
   }
 
   function ruleKey(r: { listenAddr: string; listenPort: number; targetAddr: string; targetPort: number; protocol: string }): string {
     return `${r.listenAddr}:${r.listenPort}->${r.targetAddr}:${r.targetPort}/${r.protocol}`;
   }
 
+  function inactiveRule(saved: SavedRule): ForwardRule {
+    return {
+      ...saved, id: crypto.randomUUID(), paused: saved.paused ?? false,
+      totalBytesIn: 0, totalBytesOut: 0, speedIn: 0, speedOut: 0,
+      connectionCount: 0, connections: [], running: false,
+      expanded: false, editing: false,
+    };
+  }
+
   async function restoreRules() {
+    if (busy.value || ready.value || restoring) return;
+    restoring = true;
+    loading.value = true;
+    loadError.value = "";
     try {
-      // First, pull rules that already exist in the Rust backend. On an F5 /
-      // webview reload the backend process keeps running (ports still bound),
-      // so we must reuse those live rules instead of re-adding them (which
-      // would fail with "port in use" and make the entries disappear).
-      let existing: ForwardRule[] = [];
-      try {
-        existing = await invoke<ForwardRule[]>("get_forward_rules");
-      } catch (_) {}
+      const saved = await invoke<SavedRule[]>("get_saved_forward_rules");
+      const existing = await invoke<ForwardRule[]>("get_forward_rules");
       const existingByKey = new Map<string, ForwardRule>();
-      for (const e of existing) existingByKey.set(ruleKey(e), e);
-
-      const saved = await store.get<SavedRule[]>(STORE_KEY);
-      if (saved && saved.length > 0) {
-        for (const r of saved) {
-          if (r.paused) {
-            // Paused: add to list without starting
-            rules.value.push({
-              id: Math.random().toString(36).slice(2, 10),
-              listenAddr: r.listenAddr, listenPort: r.listenPort,
-              targetAddr: r.targetAddr, targetPort: r.targetPort,
-              protocol: r.protocol,
-              totalBytesIn: 0, totalBytesOut: 0,
-              speedIn: 0, speedOut: 0,
-              connectionCount: 0, connections: [],
-              running: false, expanded: false, editing: false, paused: true,
-            });
-            continue;
-          }
-
-          const live = existingByKey.get(ruleKey(r));
-          if (live) {
-            // Backend already runs this rule (reload case) — reuse its snapshot.
-            rules.value.push({ ...live, expanded: false, editing: false, paused: false });
-            existingByKey.delete(ruleKey(r));
-          } else {
-            // Not running yet (cold start) — create it.
-            try {
-              const snapshot = await invoke<ForwardRule>("add_forward_rule", { rule: r });
-              rules.value.push({ ...snapshot, expanded: false, editing: false, paused: false });
-            } catch (e) {
-              console.error("恢复规则失败:", r, e);
-            }
+      for (const snapshot of existing) existingByKey.set(ruleKey(snapshot), snapshot);
+      rules.value = saved.map(inactiveRule);
+      for (let index = 0; index < rules.value.length; index++) {
+        const rule = rules.value[index];
+        const live = existingByKey.get(ruleKey(rule));
+        if (live) {
+          rules.value[index] = { ...live, paused: false, expanded: false, editing: false };
+          existingByKey.delete(ruleKey(rule));
+        } else if (!rule.paused) {
+          try {
+            const snapshot = await invoke<ForwardRule>("add_forward_rule", { rule: saved[index] });
+            rules.value[index] = { ...snapshot, paused: false, expanded: false, editing: false };
+          } catch (error) {
+            rule.error = String(error);
           }
         }
       }
-
-      // Any backend rule not present in the saved list (e.g. added then reloaded
-      // before persistence) — surface it too, so nothing silently disappears.
       for (const live of existingByKey.values()) {
         rules.value.push({ ...live, expanded: false, editing: false, paused: false });
       }
-    } catch (_) {}
+      if (existingByKey.size > 0) saveError.value = "检测到未保存的运行规则，请重试保存";
+      ready.value = true;
+    } catch (error) {
+      loadError.value = `规则加载失败，已禁止修改配置: ${String(error)}`;
+    } finally {
+      loading.value = false;
+      restoring = false;
+    }
+  }
+
+  async function mutate(action: () => Promise<void>): Promise<boolean> {
+    if (!ready.value || loading.value || busy.value || saveError.value) return false;
+    busy.value = true;
+    operationError.value = "";
+    try {
+      await action();
+      await saveRules();
+      return true;
+    } catch (error) {
+      operationError.value = String(error);
+      return false;
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function retrySave() {
+    if (!ready.value || loading.value || busy.value) return;
+    busy.value = true;
+    try {
+      await saveRules();
+    } finally {
+      busy.value = false;
+    }
   }
 
   async function addRule(rule: SavedRule) {
-    const snapshot = await invoke<ForwardRule>("add_forward_rule", { rule });
-    rules.value.push({ ...snapshot, expanded: false, editing: false, paused: false });
-    await saveRules();
+    return mutate(async () => {
+      const snapshot = await invoke<ForwardRule>("add_forward_rule", { rule });
+      rules.value.push({ ...snapshot, expanded: false, editing: false, paused: false });
+    });
   }
 
   async function removeRule(id: string) {
-    const rule = rules.value.find(r => r.id === id);
-    if (rule && !rule.paused) {
-      try { await invoke("remove_forward_rule", { id }); } catch (_) {}
-    }
-    rules.value = rules.value.filter((r) => r.id !== id);
-    await saveRules();
+    return mutate(async () => {
+      const rule = rules.value.find(rule => rule.id === id);
+      if (rule?.running) await invoke("remove_forward_rule", { id });
+      rules.value = rules.value.filter(rule => rule.id !== id);
+    });
   }
 
   async function pauseRule(id: string) {
-    const rule = rules.value.find(r => r.id === id);
-    if (!rule) return;
-    try {
-      await invoke("pause_forward", { id });
-    } catch (_) {}
-    rule.paused = true;
-    rule.running = false;
-    rule.speedIn = 0;
-    rule.speedOut = 0;
-    rule.connectionCount = 0;
-    rule.connections = [];
-    await saveRules();
+    return mutate(async () => {
+      const rule = rules.value.find(rule => rule.id === id);
+      if (!rule) return;
+      if (rule.running) await invoke("pause_forward", { id });
+      rule.paused = true;
+      rule.running = false;
+      rule.speedIn = 0;
+      rule.speedOut = 0;
+      rule.connectionCount = 0;
+      rule.connections = [];
+      rule.error = undefined;
+    });
   }
 
   async function resumeRule(id: string) {
-    const rule = rules.value.find(r => r.id === id);
-    if (!rule) return;
-    try {
-      const snapshot = await invoke<ForwardRule>("resume_forward", {
-        rule: {
-          listenAddr: rule.listenAddr, listenPort: rule.listenPort,
-          targetAddr: rule.targetAddr, targetPort: rule.targetPort,
-          protocol: rule.protocol,
-        },
-      });
-      // Replace old entry with new one (new ID from Rust)
-      const idx = rules.value.findIndex(r => r.id === id);
-      if (idx !== -1) {
-        rules.value[idx] = { ...snapshot, expanded: rule.expanded, editing: false, paused: false };
+    return mutate(async () => {
+      const rule = rules.value.find(rule => rule.id === id);
+      if (!rule || rule.running) return;
+      try {
+        const snapshot = await invoke<ForwardRule>("resume_forward", {
+          rule: {
+            listenAddr: rule.listenAddr, listenPort: rule.listenPort,
+            targetAddr: rule.targetAddr, targetPort: rule.targetPort,
+            protocol: rule.protocol,
+          },
+        });
+        const index = rules.value.findIndex(rule => rule.id === id);
+        if (index !== -1) {
+          rules.value[index] = { ...snapshot, expanded: rule.expanded, editing: false, paused: false };
+        }
+      } catch (error) {
+        rule.error = String(error);
+        throw error;
       }
-    } catch (e) {
-      console.error("恢复规则失败:", e);
-    }
-    await saveRules();
+    });
   }
 
   async function disconnect(ruleId: string, clientAddr: string) {
@@ -207,17 +242,21 @@ export function usePortForward() {
   }
 
   onMounted(async () => {
-    await loadInterfaces();
+    void loadInterfaces();
+    try {
+      unlisten = await listen<ForwardRule>("port-forward:stats", (event) => {
+        const snapshot = event.payload;
+        const index = rules.value.findIndex(rule => rule.id === snapshot.id);
+        if (index !== -1) {
+          const { expanded, editing, paused, running } = rules.value[index];
+          if (!running) return;
+          Object.assign(rules.value[index], snapshot, { expanded, editing, paused });
+        }
+      });
+    } catch (error) {
+      console.error("订阅转发统计失败:", error);
+    }
     await restoreRules();
-
-    unlisten = await listen<ForwardRule>("port-forward:stats", (event) => {
-      const snapshot = event.payload;
-      const idx = rules.value.findIndex((r) => r.id === snapshot.id);
-      if (idx !== -1) {
-        const { expanded, editing, paused } = rules.value[idx];
-        rules.value[idx] = { ...snapshot, expanded, editing, paused };
-      }
-    });
   });
 
   onUnmounted(() => {
@@ -226,6 +265,8 @@ export function usePortForward() {
 
   return {
     rules, interfaces,
+    loading, ready, busy, loadError, saveError, operationError,
+    restoreRules, retrySave,
     addRule, removeRule, disconnect,
     pauseRule, resumeRule,
     toggleExpand, toggleEdit,

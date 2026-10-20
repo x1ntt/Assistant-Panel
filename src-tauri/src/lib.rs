@@ -107,6 +107,12 @@ pub fn run() {
             ));
             startup_diagnostics::record("shared states registered before window show and shortcut setup");
 
+            startup_diagnostics::record("configured window creation begin; shared states ready");
+            for window_config in &app.config().app.windows {
+                tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
+            }
+            startup_diagnostics::record("configured window creation completed");
+
             startup_diagnostics::record("settings read completed; window layout begin");
             // Dock the panel to the outermost right display.  Using the primary
             // display here would put a hidden panel into the adjacent display
@@ -272,6 +278,7 @@ pub fn run() {
             commands::port_forward::remove_forward_rule,
             commands::port_forward::disconnect_rule_connection,
             commands::port_forward::get_forward_rules,
+            commands::port_forward::get_saved_forward_rules,
             commands::port_forward::pause_forward,
             commands::port_forward::resume_forward,
             commands::window_pin::toggle_pin_focused,
@@ -306,4 +313,16 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod startup_tests {
+    #[test]
+    fn webviews_are_deferred_until_shared_states_are_registered() {
+        let config: tauri::Config = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert!(!config.app.windows.is_empty());
+        for window in config.app.windows {
+            assert!(!window.create, "Window {} must be created by setup after state registration", window.label);
+        }
+    }
 }
