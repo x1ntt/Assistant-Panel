@@ -13,6 +13,7 @@ pub struct AppState {
     pub pinned_windows: Mutex<HashMap<isize, PinnedWindow>>,
     pub pin_enabled: AtomicBool,
     pub processes: Mutex<HashMap<String, ProcessEntry>>,
+    pub process_restore_status: Mutex<Result<(), String>>,
     /// Per-process stdout/stderr ring buffer (keyed by process id).
     pub process_output: Mutex<HashMap<String, VecDeque<OutputLine>>>,
     pub logger: Logger,
@@ -25,6 +26,7 @@ impl AppState {
             pinned_windows: Mutex::new(HashMap::new()),
             pin_enabled: AtomicBool::new(pin_enabled),
             processes: Mutex::new(HashMap::new()),
+            process_restore_status: Mutex::new(Err("进程定义尚未恢复，请稍后重试".into())),
             process_output: Mutex::new(HashMap::new()),
             logger,
         }

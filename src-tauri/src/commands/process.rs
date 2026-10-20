@@ -2,79 +2,102 @@ use crate::modules::process_manager;
 use crate::state::{AppState, ProcessEntry};
 use chrono::Local;
 use nanoid::nanoid;
+use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager};
 use windows::Win32::Foundation::HANDLE;
 
 const STORE_KEY: &str = "process-manager.items";
 
+fn ensure_restored(state: &AppState) -> Result<(), String> {
+    state.process_restore_status.lock().unwrap().clone()
+}
+
 /// Save all process definitions (without runtime state) to Tauri Store
-fn save_definitions(app: &AppHandle, state: &AppState) {
+fn save_definitions(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    ensure_restored(state)?;
     let processes = state.processes.lock().unwrap();
     let defs: Vec<ProcessEntry> = processes.values().cloned().collect();
-    if let Ok(store) = tauri_plugin_store::StoreBuilder::new(app, "settings.json").build() {
-        store.set(STORE_KEY, serde_json::to_value(&defs).unwrap_or_default());
-        let _ = store.save();
+    state.logger.plugin("process-manager", "INFO", &format!("PROCESS_SAVE_BEGIN count={}", defs.len()));
+    let result = (|| {
+        let path = app.path().app_data_dir().map_err(|error| error.to_string())?.join("settings.json");
+        read_definitions(&path)?;
+        let store = tauri_plugin_store::StoreBuilder::new(app, "settings.json")
+            .build().map_err(|error| error.to_string())?;
+        let value = serde_json::to_value(&defs).map_err(|error| error.to_string())?;
+        store.set(STORE_KEY, value);
+        store.save().map_err(|error| error.to_string())
+    })();
+    match result {
+        Ok(()) => {
+            state.logger.plugin("process-manager", "INFO", &format!("PROCESS_SAVE_OK count={}", defs.len()));
+            Ok(())
+        }
+        Err(error) => {
+            let message = format!("进程配置未保存，运行状态已改变，请重试保存: {error}");
+            state.logger.plugin("process-manager", "ERROR", &format!("PROCESS_SAVE_FAILED count={} error={error}", defs.len()));
+            Err(message)
+        }
     }
 }
 
-/// Load process definitions from Tauri Store and record every failure point.
-fn load_definitions(app: &AppHandle, state: &AppState) -> Vec<ProcessEntry> {
-    let settings_path = app
-        .path()
-        .app_config_dir()
-        .map(|path| path.join("settings.json"));
-    state.logger.plugin(
-        "process-manager",
-        "INFO",
-        &format!("读取进程定义: key={}, settings={}", STORE_KEY, settings_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|_| "<路径不可用>".to_string())),
-    );
-
-    let store = match tauri_plugin_store::StoreBuilder::new(app, "settings.json").build() {
-        Ok(store) => store,
-        Err(err) => {
-            state.logger.plugin("process-manager", "ERROR", &format!("打开 settings.json 失败: {}", err));
-            return vec![];
-        }
+fn parse_definitions(bytes: &[u8]) -> Result<Vec<ProcessEntry>, String> {
+    let settings: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(bytes).map_err(|error| format!("settings.json 无效: {error}"))?;
+    let Some(value) = settings.get(STORE_KEY) else {
+        return Ok(Vec::new());
     };
-
-    let Some(value) = store.get(STORE_KEY) else {
-        state.logger.plugin("process-manager", "WARN", &format!("未找到配置键 {}", STORE_KEY));
-        return vec![];
-    };
-
-    match serde_json::from_value::<Vec<ProcessEntry>>(value) {
-        Ok(entries) => {
-            state.logger.plugin("process-manager", "INFO", &format!("成功读取 {} 条进程定义", entries.len()));
-            entries
+    let entries: Vec<ProcessEntry> = serde_json::from_value(value.clone())
+        .map_err(|error| format!("进程定义无效: {error}"))?;
+    let mut ids = std::collections::HashSet::new();
+    for entry in &entries {
+        if entry.id.is_empty() || !ids.insert(&entry.id) || entry.command.trim().is_empty() {
+            return Err("进程定义无效: ID 为空、重复或命令为空".into());
         }
-        Err(err) => {
-            state.logger.plugin("process-manager", "ERROR", &format!("进程定义反序列化失败: {}", err));
-            vec![]
-        }
+    }
+    Ok(entries)
+}
+
+fn read_definitions(path: &Path) -> Result<Vec<ProcessEntry>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => parse_definitions(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("读取进程定义失败: {error}")),
     }
 }
 
 /// Called during app startup to restore saved definitions into state
-pub fn restore_definitions(app: &AppHandle, state: &AppState) {
-    let defs = load_definitions(app, state);
-    if defs.is_empty() {
-        state.logger.plugin("process-manager", "INFO", "没有可恢复的进程定义");
-        return;
+pub fn restore_definitions(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let result = (|| {
+        let path = app.path().app_data_dir().map_err(|error| error.to_string())?.join("settings.json");
+        state.logger.plugin("process-manager", "INFO", &format!("PROCESS_RESTORE_BEGIN settings={} windows={}", path.display(), app.webview_windows().len()));
+        let defs = read_definitions(&path)?;
+        let mut processes = state.processes.lock().unwrap();
+        for mut entry in defs {
+            state.logger.plugin(
+                "process-manager",
+                "INFO",
+                &format!("恢复定义: id={}, autoStart={}, autoRestart={}", entry.id, entry.auto_start, entry.auto_restart),
+            );
+            entry.status = "stopped".to_string();
+            entry.pid = None;
+            entry.job_handle = None;
+            entry.started_at = None;
+            processes.insert(entry.id.clone(), entry);
+        }
+        state.logger.plugin("process-manager", "INFO", &format!("PROCESS_RESTORE_OK count={} elapsed_ms={}", processes.len(), started.elapsed().as_millis()));
+        Ok(())
+    })();
+    *state.process_restore_status.lock().unwrap() = result.clone();
+    if let Err(error) = &result {
+        state.logger.plugin("process-manager", "ERROR", &format!("PROCESS_RESTORE_FAILED error={error}; 已禁止修改配置"));
     }
-    let mut processes = state.processes.lock().unwrap();
-    for mut entry in defs {
-        state.logger.plugin(
-            "process-manager",
-            "INFO",
-            &format!("恢复定义: id={}, autoStart={}, autoRestart={}", entry.id, entry.auto_start, entry.auto_restart),
-        );
-        entry.status = "stopped".to_string();
-        entry.pid = None;
-        entry.job_handle = None;
-        entry.started_at = None;
-        processes.insert(entry.id.clone(), entry);
-    }
-    state.logger.plugin("process-manager", "INFO", &format!("恢复完成，内存中共有 {} 条定义", processes.len()));
+    result
+}
+
+#[tauri::command]
+pub fn save_process_definitions(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    save_definitions(&app, &state)
 }
 
 #[tauri::command]
@@ -86,6 +109,7 @@ pub fn add_process(
     auto_restart: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<ProcessEntry, String> {
+    ensure_restored(&state)?;
     let (cmd, args) = process_manager::parse_command(&command);
     if cmd.is_empty() {
         return Err("命令不能为空".to_string());
@@ -116,7 +140,7 @@ pub fn add_process(
 
     let result = entry.clone();
     state.processes.lock().unwrap().insert(entry.id.clone(), entry);
-    save_definitions(&app, &state);
+    save_definitions(&app, &state)?;
     let _ = app.emit("process-manager:status", result.clone());
 
     Ok(result)
@@ -207,6 +231,7 @@ pub fn remove_process(
     id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    ensure_restored(&state)?;
     let entry = {
         let mut processes = state.processes.lock().unwrap();
         processes.remove(&id).ok_or("进程不存在")?
@@ -222,7 +247,7 @@ pub fn remove_process(
     }
 
     process_manager::save_pid_map(&app, &state);
-    save_definitions(&app, &state);
+    save_definitions(&app, &state)?;
 
     // Drop any buffered output for the removed process.
     state.process_output.lock().unwrap().remove(&id);
@@ -246,6 +271,7 @@ pub fn update_process(
     auto_restart: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<ProcessEntry, String> {
+    ensure_restored(&state)?;
     let (cmd, args) = process_manager::parse_command(&command);
     if cmd.is_empty() {
         return Err("命令不能为空".to_string());
@@ -286,7 +312,7 @@ pub fn update_process(
     let _ = app.emit("process-manager:status", entry.clone());
 
     drop(processes);
-    save_definitions(&app, &state);
+    save_definitions(&app, &state)?;
 
     state.logger.plugin(
         "process-manager",
@@ -298,11 +324,22 @@ pub fn update_process(
 }
 
 #[tauri::command]
-pub fn list_processes(state: tauri::State<'_, AppState>) -> Vec<ProcessEntry> {
+pub fn list_processes(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>) -> Result<Vec<ProcessEntry>, String> {
+    if let Err(error) = ensure_restored(&state) {
+        state.logger.plugin("process-manager", "WARN", &format!("PROCESS_LIST_BLOCKED window={} ready=false error={error}", window.label()));
+        return Err(error);
+    }
     let processes = state.processes.lock().unwrap();
     let entries: Vec<ProcessEntry> = processes.values().cloned().collect();
-    state.logger.plugin("process-manager", "INFO", &format!("前端请求进程列表，返回 {} 条", entries.len()));
-    entries
+    state.logger.plugin("process-manager", "INFO", &format!("PROCESS_LIST_OK window={} ready=true count={}", window.label(), entries.len()));
+    Ok(entries)
+}
+
+#[tauri::command]
+pub fn report_process_view(window: tauri::WebviewWindow, visible_count: usize, state: tauri::State<'_, AppState>) {
+    let count = state.processes.lock().unwrap().len();
+    state.logger.plugin("process-manager", if count == visible_count { "INFO" } else { "WARN" },
+        &format!("PROCESS_VIEW_APPLIED window={} visible_count={visible_count} backend_count={count} match={}", window.label(), count == visible_count));
 }
 
 /// Return the buffered stdout/stderr output lines for a process.
@@ -323,5 +360,48 @@ pub fn clear_process_output(id: String, state: tauri::State<'_, AppState>) {
     let mut map = state.process_output.lock().unwrap();
     if let Some(dq) = map.get_mut(&id) {
         dq.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_definitions, read_definitions};
+
+    fn definition() -> serde_json::Value {
+        serde_json::json!({"id":"one","command":"example","cmd":"example","args":[],
+            "workingDir":"","autoStart":false,"autoRestart":false,"pid":null,
+            "status":"stopped","startedAt":null})
+    }
+
+    #[test]
+    fn reads_existing_definitions_and_only_missing_key_means_empty() {
+        let bytes = serde_json::to_vec(&serde_json::json!({"process-manager.items":[definition()]})).unwrap();
+        let entries = parse_definitions(&bytes).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "one");
+        assert!(parse_definitions(b"{}").unwrap().is_empty());
+        for bytes in [b"{".as_slice(), b"[]", br#"{"process-manager.items":null}"#,
+            br#"{"process-manager.items":[{}]}"#] {
+            assert!(parse_definitions(bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn duplicate_ids_and_blank_commands_fail_without_dropping_entries() {
+        let duplicate = serde_json::to_vec(&serde_json::json!({"process-manager.items":[definition(),definition()]})).unwrap();
+        assert!(parse_definitions(&duplicate).is_err());
+        let mut blank = definition();
+        blank["command"] = " ".into();
+        let bytes = serde_json::to_vec(&serde_json::json!({"process-manager.items":[blank]})).unwrap();
+        assert!(parse_definitions(&bytes).is_err());
+    }
+
+    #[test]
+    fn read_errors_are_not_treated_as_an_empty_configuration() {
+        let directory = std::env::temp_dir().join(format!("process-read-test-{}", nanoid::nanoid!()));
+        std::fs::create_dir_all(&directory).unwrap();
+        assert!(read_definitions(&directory).is_err());
+        assert!(read_definitions(&directory.join(format!("missing-process-settings-{}", nanoid::nanoid!()))).unwrap().is_empty());
+        std::fs::remove_dir(directory).unwrap();
     }
 }

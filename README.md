@@ -53,6 +53,16 @@ pnpm tauri build
 
 Tauri 开发模式通过 `beforeDevCommand` 启动 Vite（端口 1420）。正式构建先执行 `pnpm build`（`vue-tsc --noEmit` + Vite），将前端写入 `dist/`，再编译 Rust 并生成安装包。默认 Rust 产物在 `src-tauri/target/`，安装包在 `src-tauri/target/release/bundle/`；这些产物不纳入 Git。
 
+## 进程管理恢复与验证日志
+
+进程定义读取、内存恢复、自动启动/重连均在创建 WebView 之前完成。未恢复或读取失败时，列表命令返回明确错误，禁止用空列表覆盖配置；保存失败时界面显示“未保存”，可点击“重试保存”。
+
+在应用“日志”中选择 `process-manager`（`system` 也包含同样记录）。正常启动应依次看到 `PROCESS_RESTORE_BEGIN windows=0`、`PROCESS_RESTORE_OK count=N`、`PROCESS_INIT_READY count=N windows=0`，随后是 `PROCESS_WINDOWS_BEGIN` 和 `PROCESS_LIST_OK window=main ready=true count=N`。前端应用列表后记录 `PROCESS_VIEW_APPLIED visible_count=N backend_count=N match=true`。这些记录还包含其他字段；N 应与实际保存的条目数量一致。
+
+`PROCESS_LIST_BLOCKED` 表示列表请求发生在未就绪或恢复失败时，`PROCESS_RESTORE_FAILED` 记录读取错误，`PROCESS_SAVE_BEGIN/OK/FAILED` 记录保存数量和结果。普通日志文件位于 `%LOCALAPPDATA%\com.administrator.assistant-panel\logs\启动时间\process-manager.log`；日志页面会排除 `diagnostics` 目录，避免把诊断目录误当作最新运行日志。
+
+进程管理前端回归测试：`node --test src/plugins/process-manager/composables/useProcessManager.test.mjs`。
+
 ## 端口转发规则恢复
 
 规则保存在应用数据目录的 `settings.json`，键为 `port-forward.rules`。重启后即使端口被占用或监听 IP 不可用，规则仍保留在列表中，显示“启动失败”和原因，可点击播放按钮重试；暂停规则保持暂停。

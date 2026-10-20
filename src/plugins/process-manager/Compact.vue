@@ -19,7 +19,9 @@ const {
   processes, addProcess, startProc, stopProc,
   removeProc, updateProc, toggleEdit, toggleExpand,
   getOutput, loadOutput, loadProcesses, loadError,
+  loading, ready, busy, mutationError, saveError, retrySave,
 } = useProcessManager();
+const canModify = computed(() => ready.value && !loading.value && !busy.value && !saveError.value);
 
 // Push count + add action into the shared card title bar.
 const count = computed(() => processes.value.length);
@@ -108,6 +110,7 @@ const newProc = ref({
 const addError = ref("");
 
 function openAddRow() {
+  if (!canModify.value) return;
   showAddRow.value = true;
   newProc.value = { command: "", workingDir: "", autoStart: false, autoRestart: false };
   addError.value = "";
@@ -125,13 +128,13 @@ async function confirmAdd() {
     return;
   }
   try {
-    await addProcess(
+    const added = await addProcess(
       newProc.value.command,
       newProc.value.workingDir,
       newProc.value.autoStart,
       newProc.value.autoRestart,
     );
-    showAddRow.value = false;
+    if (added || saveError.value) showAddRow.value = false;
   } catch (e) {
     addError.value = String(e);
   }
@@ -187,6 +190,17 @@ function statusLabel(status: string) {
 
 <template>
   <div class="w-full overflow-hidden">
+    <div v-if="loading" class="py-1 text-[9px] text-muted-foreground" role="status">正在加载进程定义…</div>
+    <div v-if="loadError" class="py-1 text-[9px] text-destructive" role="alert">
+      {{ loadError }}
+      <Button variant="ghost" class="h-5 px-1 text-[9px]" :disabled="loading" @click="loadProcesses">重试加载</Button>
+    </div>
+    <div v-if="saveError" class="py-1 text-[9px] text-destructive" role="alert">
+      {{ saveError }}
+      <Button variant="ghost" class="h-5 px-1 text-[9px]" :disabled="busy" @click="retrySave">重试保存</Button>
+    </div>
+    <div v-if="mutationError" class="py-1 text-[9px] text-destructive" role="alert">{{ mutationError }}</div>
+    <fieldset :disabled="!canModify" class="min-w-0 border-0 p-0 m-0">
     <div class="overflow-x-auto">
       <table class="w-full text-[9px] border-collapse">
         <thead>
@@ -380,13 +394,7 @@ function statusLabel(status: string) {
           <tr v-if="addError" class="bg-destructive/10">
             <td colspan="5" class="px-1 py-0.5 text-destructive text-[8px] text-center">{{ addError }}</td>
           </tr>
-          <tr v-if="loadError" class="bg-destructive/10">
-            <td colspan="5" class="px-1 py-1 text-center text-[8px] text-destructive">
-              <span>{{ loadError }}</span>
-              <button class="ml-1 underline hover:text-destructive/70" @click="loadProcesses">重试</button>
-            </td>
-          </tr>
-          <tr v-if="processes.length === 0 && !showAddRow">
+          <tr v-if="ready && processes.length === 0 && !showAddRow">
             <td colspan="5" class="px-1 py-2 text-center text-muted-foreground text-[9px]">
               暂无进程，点击 + 添加
             </td>
@@ -394,5 +402,6 @@ function statusLabel(status: string) {
         </tbody>
       </table>
     </div>
+    </fieldset>
   </div>
 </template>

@@ -1,8 +1,16 @@
 use crate::state::LogEntry;
-use chrono::Local;
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
+
+fn latest_session(log_base: &std::path::Path) -> Result<Option<PathBuf>, String> {
+    Ok(fs::read_dir(log_base)
+        .map_err(|error| error.to_string())?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir() && entry.path().join("system.log").is_file())
+        .max_by_key(|entry| entry.file_name())
+        .map(|entry| entry.path()))
+}
 
 #[tauri::command]
 pub async fn get_logs(app: AppHandle, source: Option<String>) -> Result<Vec<LogEntry>, String> {
@@ -12,12 +20,7 @@ pub async fn get_logs(app: AppHandle, source: Option<String>) -> Result<Vec<LogE
         .unwrap_or_else(|_| PathBuf::from("./logs"));
 
     // Find the latest log directory
-    let latest_dir = fs::read_dir(&log_base)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .max_by_key(|e| e.file_name())
-        .map(|e| e.path());
+    let latest_dir = latest_session(&log_base)?;
 
     let Some(dir) = latest_dir else {
         return Ok(vec![]);
@@ -46,12 +49,7 @@ pub async fn list_log_sources(app: AppHandle) -> Result<Vec<String>, String> {
         .app_log_dir()
         .unwrap_or_else(|_| PathBuf::from("./logs"));
 
-    let latest_dir = fs::read_dir(&log_base)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .max_by_key(|e| e.file_name())
-        .map(|e| e.path());
+    let latest_dir = latest_session(&log_base)?;
 
     let Some(dir) = latest_dir else {
         return Ok(vec![]);
@@ -92,4 +90,22 @@ fn parse_log_line(line: &str, source: &str) -> Option<LogEntry> {
         source: source.to_string(),
         message: message.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::latest_session;
+
+    #[test]
+    fn diagnostics_directory_does_not_hide_the_latest_application_logs() {
+        let root = std::env::temp_dir().join(format!("assistant-log-test-{}", nanoid::nanoid!()));
+        for name in ["2026-10-19_09-00-00", "2026-10-20_09-00-00", "diagnostics"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        for name in ["2026-10-19_09-00-00", "2026-10-20_09-00-00"] {
+            std::fs::write(root.join(name).join("system.log"), "").unwrap();
+        }
+        assert_eq!(latest_session(&root).unwrap(), Some(root.join("2026-10-20_09-00-00")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -34,6 +34,13 @@ export const selectedOutputId = ref<string | null>(null);
 export function useProcessManager() {
   const processes = ref<ManagedProcess[]>([]);
   const loadError = ref<string | null>(null);
+  const loading = ref(true);
+  const ready = ref(false);
+  const busy = ref(false);
+  const mutationError = ref("");
+  const saveError = ref("");
+  const pendingSnapshots = new Map<string, ManagedProcess>();
+  let fetching = false;
   // Per-process output lines, keyed by process id.
   const outputs = ref<Record<string, OutputLine[]>>({});
   let unlisten: UnlistenFn | null = null;
@@ -67,6 +74,10 @@ export function useProcessManager() {
   }
 
   async function loadProcesses() {
+    if (fetching) return;
+    fetching = true;
+    loading.value = true;
+    pendingSnapshots.clear();
     try {
       const list = await invoke<ManagedProcess[]>("list_processes");
       processes.value = list.map((p) => ({
@@ -74,11 +85,63 @@ export function useProcessManager() {
         editing: false,
         expanded: false,
       }));
+      for (const snapshot of pendingSnapshots.values()) upsertProcess(snapshot);
       loadError.value = null;
+      ready.value = true;
+      try {
+        await invoke("report_process_view", { visibleCount: processes.value.length });
+      } catch (error) {
+        console.error("记录进程视图日志失败:", error);
+      }
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       loadError.value = `加载进程列表失败：${detail}`;
+      ready.value = false;
       console.error(loadError.value);
+    } finally {
+      loading.value = false;
+      fetching = false;
+    }
+  }
+
+  function upsertProcess(snapshot: ManagedProcess) {
+    const index = processes.value.findIndex(process => process.id === snapshot.id);
+    if (index === -1) {
+      processes.value.push({ ...snapshot, editing: false, expanded: false });
+    } else {
+      const { editing, expanded } = processes.value[index];
+      processes.value[index] = { ...snapshot, editing, expanded };
+    }
+  }
+
+  async function mutate(action: () => Promise<void>): Promise<boolean> {
+    if (!ready.value || loading.value || busy.value || saveError.value) return false;
+    busy.value = true;
+    mutationError.value = "";
+    try {
+      await action();
+      return true;
+    } catch (error) {
+      const detail = String(error);
+      if (detail.includes("进程配置未保存")) saveError.value = detail;
+      else mutationError.value = detail;
+      await loadProcesses();
+      return false;
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function retrySave() {
+    if (!ready.value || loading.value || busy.value) return;
+    busy.value = true;
+    try {
+      await invoke("save_process_definitions");
+      saveError.value = "";
+    } catch (error) {
+      saveError.value = String(error);
+    } finally {
+      busy.value = false;
     }
   }
 
@@ -88,37 +151,41 @@ export function useProcessManager() {
     autoStart: boolean,
     autoRestart: boolean
   ) {
-    const entry = await invoke<ManagedProcess>("add_process", {
-      command,
-      workingDir,
-      autoStart,
-      autoRestart,
+    return mutate(async () => {
+      const entry = await invoke<ManagedProcess>("add_process", {
+        command,
+        workingDir,
+        autoStart,
+        autoRestart,
+      });
+      upsertProcess(entry);
     });
-    processes.value.push({ ...entry, editing: false });
   }
 
   async function startProc(id: string) {
-    await invoke("start_process_cmd", { id });
-    const p = processes.value.find((p) => p.id === id);
-    if (p) {
-      p.status = "running";
-    }
+    return mutate(async () => {
+      await invoke("start_process_cmd", { id });
+      const process = processes.value.find(process => process.id === id);
+      if (process) process.status = "running";
+    });
   }
 
   async function stopProc(id: string) {
-    await invoke("stop_process", { id });
-    const p = processes.value.find((p) => p.id === id);
-    if (p) {
-      p.status = "stopped";
-      p.pid = null;
-    }
+    return mutate(async () => {
+      await invoke("stop_process", { id });
+      const process = processes.value.find(process => process.id === id);
+      if (process) {
+        process.status = "stopped";
+        process.pid = null;
+      }
+    });
   }
 
   async function removeProc(id: string) {
-    try {
+    return mutate(async () => {
       await invoke("remove_process", { id });
-    } catch (_) {}
-    processes.value = processes.value.filter((p) => p.id !== id);
+      processes.value = processes.value.filter((p) => p.id !== id);
+    });
   }
 
   async function updateProc(
@@ -128,17 +195,17 @@ export function useProcessManager() {
     autoStart: boolean,
     autoRestart: boolean
   ) {
-    const entry = await invoke<ManagedProcess>("update_process", {
-      id,
-      command,
-      workingDir,
-      autoStart,
-      autoRestart,
+    return mutate(async () => {
+      const entry = await invoke<ManagedProcess>("update_process", {
+        id,
+        command,
+        workingDir,
+        autoStart,
+        autoRestart,
+      });
+      const index = processes.value.findIndex(process => process.id === id);
+      if (index !== -1) processes.value[index] = { ...entry, editing: false };
     });
-    const idx = processes.value.findIndex((p) => p.id === id);
-    if (idx !== -1) {
-      processes.value[idx] = { ...entry, editing: false };
-    }
   }
 
   function toggleEdit(id: string) {
@@ -152,27 +219,19 @@ export function useProcessManager() {
   }
 
   onMounted(async () => {
-    // The backend finishes restoring managed processes while the desktop
-    // window is being created. Retry transient IPC failures so a blank card
-    // cannot become a permanent state after startup.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await loadProcesses();
-      if (!loadError.value) break;
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 300 * (attempt + 1)));
+    try {
+      unlisten = await listen<ManagedProcess>("process-manager:status", (event) => {
+        const snapshot = event.payload;
+        if (fetching) pendingSnapshots.set(snapshot.id, snapshot);
+        upsertProcess(snapshot);
+      });
+      unlistenOutput = await listen<OutputLine>("process-manager:output", (event) => {
+        appendOutput(event.payload);
+      });
+    } catch (error) {
+      console.error("订阅进程事件失败:", error);
     }
-
-    unlisten = await listen<ManagedProcess>("process-manager:status", (event) => {
-      const snapshot = event.payload;
-      const idx = processes.value.findIndex((p) => p.id === snapshot.id);
-      if (idx !== -1) {
-        const { editing, expanded } = processes.value[idx];
-        processes.value[idx] = { ...snapshot, editing, expanded };
-      }
-    });
-
-    unlistenOutput = await listen<OutputLine>("process-manager:output", (event) => {
-      appendOutput(event.payload);
-    });
+    await loadProcesses();
   });
 
   onUnmounted(() => {
@@ -183,6 +242,7 @@ export function useProcessManager() {
   return {
     processes,
     loadError,
+    loading, ready, busy, mutationError, saveError, retrySave,
     outputs,
     loadProcesses,
     addProcess,

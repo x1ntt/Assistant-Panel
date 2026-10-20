@@ -107,11 +107,26 @@ pub fn run() {
             ));
             startup_diagnostics::record("shared states registered before window show and shortcut setup");
 
+            startup_diagnostics::record("process initialization begin; configured windows not created");
+            if plugin_enabled("process-manager") {
+                let app_state = app.state::<state::AppState>();
+                if commands::process::restore_definitions(app.handle(), app_state.inner()).is_ok() {
+                    modules::process_manager::startup_auto_processes(app.handle(), app_state.inner());
+                    let count = app_state.processes.lock().unwrap().len();
+                    log.plugin("process-manager", "INFO", &format!("PROCESS_INIT_READY count={count} windows={}", app.webview_windows().len()));
+                }
+            } else {
+                *app.state::<state::AppState>().process_restore_status.lock().unwrap() = Err("进程管理插件未在启动时启用，请启用后重启应用".into());
+                log.plugin("process-manager", "INFO", "PROCESS_INIT_SKIPPED plugin_enabled=false");
+            }
+
             startup_diagnostics::record("configured window creation begin; shared states ready");
+            log.plugin("process-manager", "INFO", "PROCESS_WINDOWS_BEGIN");
             for window_config in &app.config().app.windows {
                 tauri::WebviewWindowBuilder::from_config(app.handle(), window_config)?.build()?;
             }
             startup_diagnostics::record("configured window creation completed");
+            log.plugin("process-manager", "INFO", &format!("PROCESS_WINDOWS_READY count={}", app.webview_windows().len()));
 
             startup_diagnostics::record("settings read completed; window layout begin");
             // Dock the panel to the outermost right display.  Using the primary
@@ -224,16 +239,7 @@ pub fn run() {
             log.system("INFO", "Application ready");
             modules::network_monitor::start_monitor(app.handle().clone());
 
-            startup_diagnostics::record("network monitor started; process restore begin");
-            // Restore process definitions and auto-start (skip if plugin disabled).
-            if plugin_enabled("process-manager") {
-                let app_handle = app.handle().clone();
-                let app_state = app.state::<state::AppState>();
-                commands::process::restore_definitions(&app_handle, app_state.inner());
-                modules::process_manager::startup_auto_processes(&app_handle, app_state.inner());
-            }
-
-            startup_diagnostics::record("process restore completed; gold monitor begin");
+            startup_diagnostics::record("network monitor started; gold monitor begin");
             // Start background gold-price monitor (skip if API dashboard disabled).
             if plugin_enabled("api-dashboard") {
                 modules::gold_monitor::start_monitor(app.handle().clone());
@@ -293,6 +299,8 @@ pub fn run() {
             commands::process::remove_process,
             commands::process::update_process,
             commands::process::list_processes,
+            commands::process::save_process_definitions,
+            commands::process::report_process_view,
             commands::process::get_process_output,
             commands::process::clear_process_output,
         ])
