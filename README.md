@@ -24,6 +24,7 @@
 - [x] 窗口置顶 (Ctrl+Alt+` + 蓝色边框 + 开关)
 - [x] 主题切换 (亮/暗)
 - [x] 卡片拖拽排序 (持久化)
+- [x] 待办事项（两级任务、行内编辑、完成联动与可靠本地持久化）
 - [x] 退出按钮 (确认弹窗) + Alt+F4 屏蔽
 
 ### 待实现
@@ -70,6 +71,19 @@ Tauri 开发模式通过 `beforeDevCommand` 启动 Vite（端口 1420）。正�
 
 架构上，`src/plugins/network-traffic/` 只订阅 Tauri 快照和发出操作命令，`src-tauri/src/modules/network_monitor.rs` 负责发现与采样，`commands/network_traffic.rs` 提供 IPC。无 Vue Router，也没有每个窗口独立采样。
 
+## 待办事项
+
+任务文字与输入使用 11px 字号。有子任务的父任务左侧箭头可展开/收起子任务，默认展开；折叠状态保留在本次运行中，重启后恢复展开，不参与任务数据同步。新增子任务会自动展开；折叠前先保存正在编辑的子任务，保存失败时保留展开与草稿。折叠不改变完成计算或级联删除范围。Todo 后端状态在 Builder 阶段注册，不依赖 setup 读取设置完成后才能首次加载。
+
+“待办事项”默认启用，标题徽标是未删除的顶层任务总数。在设置中禁用只隐藏卡片，不清除已保存任务。
+
+- 标题右上角 **+** 在列表末尾新增任务；父任务右侧 **+** 新增子任务，仅支持两级，不支持任务拖拽或筛选。
+- 双击任务文字，或聚焦文字后按 **Enter / F2** 行内编辑。草稿按 **Enter** 或失焦提交，**Esc** 取消且不收起面板；中文输入法组合期间不提交或取消。空白新增取消，空白编辑报错且原任务不变。一次只编辑一个草稿，切换前提交；保存失败保留草稿，可再次提交，版本冲突可点击“刷新”后重试。尚未提交的草稿不持久化。
+- 无子任务的父任务可手动勾选。有子任务时父任务不显示复选框，只有全部未删除子任务完成才完成；完成文字加删除线，不改变顺序。新增子任务默认未完成；删除子任务按剩余子任务重算，删除最后一个子任务保留父任务当时的有效状态并恢复复选框。
+- 删除父任务会同时删除全部子任务。未完成父任务需在按钮附近的浮层再次点击“删除”；再次点击原删除按钮、“取消”、**Esc** 或等待 4 秒可取消。确认时任务状态或子任务集合变化会更新提示并要求重新确认。已完成父任务、子任务直接删除。
+- 已保存数据位于 Tauri 的应用数据目录 `app_data_dir/todo.json`（Windows 默认 `%LOCALAPPDATA%\com.administrator.assistant-panel\todo.json`），独立于 Tauri Store。加载失败会显示错误与重试，不用空任务覆盖损坏文件；提交采用版本检查与同目录临时文件替换，失败保留已确认数据。
+- 删除采用 `deletedAt` 标记，界面隐藏但文件保留记录，不自动清理。稳定 ID、父引用、时间与删除标记只提供未来同步的数据基础；当前没有网络同步，`revision` 仅是本地提交序号，不是跨设备冲突协议。未来 API 仍需鉴权、服务端版本/游标、离线队列、冲突与删除清理策略。
+
 ## 项目结构
 
 ```
@@ -78,7 +92,7 @@ assistant-panel/
 │   ├── components/               # PanelShell, ToolList, BottomBar, FloatingContent...
 │   ├── components/ui/            # shadcn-vue 组件
 │   ├── composables/              # useTauriCommand, useTheme, usePluginOrder, useHotkeyRecorder
-│   ├── plugins/                  # port-forward, window-pin, process-manager, api-dashboard
+│   ├── plugins/                  # todo, network-traffic, port-forward, window-pin, process-manager, api-dashboard
 │   ├── stores/                   # panel.ts
 │   └── lib/                      # utils.ts
 ├── src-tauri/                    # Rust 后端

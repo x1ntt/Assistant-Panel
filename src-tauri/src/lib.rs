@@ -18,6 +18,8 @@ pub fn run() {
     startup_diagnostics::init();
     startup_diagnostics::record("run entered; Tauri builder/build begin");
     let application = tauri::Builder::default()
+        // Register before configured webviews can issue their first Todo IPC.
+        .manage(commands::todo::TodoState::default())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
@@ -235,6 +237,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::todo::get_todo_document,
+            commands::todo::save_todo_document,
             commands::network_traffic::get_network_traffic_snapshot,
             commands::network_traffic::pin_network_traffic_interface,
             commands::network_traffic::set_network_traffic_highlight,

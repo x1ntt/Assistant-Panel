@@ -5,4 +5,5 @@ pub mod panel;
 pub mod port_forward;
 pub mod process;
 pub mod settings;
+pub mod todo;
 pub mod window_pin;

@@ -15,6 +15,16 @@ export const pluginRegistry: PanelPlugin[] = [
     enabled: true,
   },
   {
+    id: "todo",
+    name: "待办事项",
+    description: "两级待办任务与本地持久化",
+    icon: "ListTodo",
+    category: "system",
+    compactView: defineAsyncComponent(() => import("./todo/Compact.vue")),
+    order: 5,
+    enabled: true,
+  },
+  {
     id: "port-forward",
     name: "端口转发",
     description: "TCP/UDP 端口转发",

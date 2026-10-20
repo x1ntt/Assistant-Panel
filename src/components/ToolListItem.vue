@@ -56,6 +56,8 @@ provide(CardHeaderKey, {
       <div class="flex items-center gap-0.5 shrink-0">
         <Button
           v-if="cardOnAdd"
+          :title="'添加' + plugin.name"
+          :aria-label="'添加' + plugin.name"
           variant="ghost"
           size="icon"
           class="h-5 w-5"
