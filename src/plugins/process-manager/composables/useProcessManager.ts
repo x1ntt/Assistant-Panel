@@ -41,6 +41,8 @@ export function useProcessManager() {
   const saveError = ref("");
   const pendingSnapshots = new Map<string, ManagedProcess>();
   let fetching = false;
+  let statusRevision = 0;
+  const processRevisions = new Map<string, number>();
   // Per-process output lines, keyed by process id.
   const outputs = ref<Record<string, OutputLine[]>>({});
   let unlisten: UnlistenFn | null = null;
@@ -114,6 +116,12 @@ export function useProcessManager() {
     }
   }
 
+  function applyResponse(snapshot: ManagedProcess, revision: number) {
+    // A fast exit or another window's stop can arrive before the command
+    // response. Keep that newer event instead of forcing status to running.
+    if ((processRevisions.get(snapshot.id) ?? 0) <= revision) upsertProcess(snapshot);
+  }
+
   async function mutate(action: () => Promise<void>): Promise<boolean> {
     if (!ready.value || loading.value || busy.value || saveError.value) return false;
     busy.value = true;
@@ -152,32 +160,30 @@ export function useProcessManager() {
     autoRestart: boolean
   ) {
     return mutate(async () => {
+      const revision = statusRevision;
       const entry = await invoke<ManagedProcess>("add_process", {
         command,
         workingDir,
         autoStart,
         autoRestart,
       });
-      upsertProcess(entry);
+      applyResponse(entry, revision);
     });
   }
 
   async function startProc(id: string) {
     return mutate(async () => {
-      await invoke("start_process_cmd", { id });
-      const process = processes.value.find(process => process.id === id);
-      if (process) process.status = "running";
+      const revision = statusRevision;
+      const entry = await invoke<ManagedProcess>("start_process_cmd", { id });
+      applyResponse(entry, revision);
     });
   }
 
   async function stopProc(id: string) {
     return mutate(async () => {
-      await invoke("stop_process", { id });
-      const process = processes.value.find(process => process.id === id);
-      if (process) {
-        process.status = "stopped";
-        process.pid = null;
-      }
+      const revision = statusRevision;
+      const entry = await invoke<ManagedProcess>("stop_process", { id });
+      applyResponse(entry, revision);
     });
   }
 
@@ -196,6 +202,7 @@ export function useProcessManager() {
     autoRestart: boolean
   ) {
     return mutate(async () => {
+      const revision = statusRevision;
       const entry = await invoke<ManagedProcess>("update_process", {
         id,
         command,
@@ -203,8 +210,9 @@ export function useProcessManager() {
         autoStart,
         autoRestart,
       });
-      const index = processes.value.findIndex(process => process.id === id);
-      if (index !== -1) processes.value[index] = { ...entry, editing: false };
+      applyResponse(entry, revision);
+      const process = processes.value.find(process => process.id === id);
+      if (process) process.editing = false;
     });
   }
 
@@ -222,6 +230,7 @@ export function useProcessManager() {
     try {
       unlisten = await listen<ManagedProcess>("process-manager:status", (event) => {
         const snapshot = event.payload;
+        processRevisions.set(snapshot.id, ++statusRevision);
         if (fetching) pendingSnapshots.set(snapshot.id, snapshot);
         upsertProcess(snapshot);
       });

@@ -1,10 +1,8 @@
 use crate::modules::process_manager;
 use crate::state::{AppState, ProcessEntry};
-use chrono::Local;
 use nanoid::nanoid;
 use std::path::Path;
 use tauri::{AppHandle, Emitter, Manager};
-use windows::Win32::Foundation::HANDLE;
 
 const STORE_KEY: &str = "process-manager.items";
 
@@ -81,7 +79,7 @@ pub fn restore_definitions(app: &AppHandle, state: &AppState) -> Result<(), Stri
             );
             entry.status = "stopped".to_string();
             entry.pid = None;
-            entry.job_handle = None;
+            entry.runtime = None;
             entry.started_at = None;
             processes.insert(entry.id.clone(), entry);
         }
@@ -125,12 +123,15 @@ pub fn add_process(
         auto_start,
         auto_restart,
         pid: None,
-        job_handle: None,
+        runtime: None,
         status: "stopped".to_string(),
         started_at: None,
     };
 
-    process_manager::start_process(&mut entry, &app, &state)?;
+    // Register while holding the map lock so even an immediately exiting
+    // process cannot race ahead of its entry being inserted.
+    let mut processes = state.processes.lock().unwrap();
+    process_manager::start_process(&mut entry, &app)?;
 
     state.logger.plugin(
         "process-manager",
@@ -139,9 +140,11 @@ pub fn add_process(
     );
 
     let result = entry.clone();
-    state.processes.lock().unwrap().insert(entry.id.clone(), entry);
+    processes.insert(entry.id.clone(), entry);
+    let _ = app.emit("process-manager:status", &result);
+    drop(processes);
+    process_manager::save_pid_map(&app, &state);
     save_definitions(&app, &state)?;
-    let _ = app.emit("process-manager:status", result.clone());
 
     Ok(result)
 }
@@ -151,7 +154,7 @@ pub fn start_process_cmd(
     app: AppHandle,
     id: String,
     state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<ProcessEntry, String> {
     let mut processes = state.processes.lock().unwrap();
     let entry = processes.get_mut(&id).ok_or("进程不存在")?;
 
@@ -159,21 +162,20 @@ pub fn start_process_cmd(
         return Err("进程已在运行".to_string());
     }
 
-    let (pid, job_handle, _, _) = process_manager::spawn_and_monitor(entry, &app)?;
-    entry.pid = Some(pid);
-    entry.job_handle = Some(job_handle.0 as isize);
-    entry.status = "running".to_string();
-    entry.started_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    process_manager::start_process(entry, &app)?;
 
     state.logger.plugin(
         "process-manager",
         "INFO",
-        &format!("进程启动: {} (pid: {}, id: {})", entry.command, pid, id),
+        &format!("进程启动: {} (pid: {:?}, id: {})", entry.command, entry.pid, id),
     );
 
-    let _ = app.emit("process-manager:status", entry.clone());
+    let snapshot = entry.clone();
+    let _ = app.emit("process-manager:status", &snapshot);
+    drop(processes);
+    process_manager::save_pid_map(&app, &state);
 
-    Ok(())
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -181,8 +183,8 @@ pub async fn stop_process(
     app: AppHandle,
     id: String,
     state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    let (job_handle_isize, pid_opt, cmd_display) = {
+) -> Result<ProcessEntry, String> {
+    let (snapshot, cmd_display) = {
         let mut processes = state.processes.lock().unwrap();
         let entry = processes.get_mut(&id).ok_or("进程不存在")?;
 
@@ -190,21 +192,11 @@ pub async fn stop_process(
             return Err("进程未在运行".to_string());
         }
 
-        entry.status = "stopped".to_string();
-        let job = entry.job_handle.take();
-        let pid = entry.pid.take();
-        (job, pid, entry.command.clone())
+        process_manager::stop_entry(entry)?;
+        let snapshot = entry.clone();
+        let _ = app.emit("process-manager:status", &snapshot);
+        (snapshot, entry.command.clone())
     };
-
-    // Kill order matters: taskkill /T walks the process TREE starting from the
-    // parent, so we must do it while the parent is still alive to reach all
-    // descendants. Then close the Job Object as a backstop.
-    if let Some(pid) = pid_opt {
-        process_manager::kill_process_tree(pid);
-    }
-    if let Some(jh) = job_handle_isize {
-        process_manager::kill_job(HANDLE(jh as *mut _));
-    }
 
     process_manager::save_pid_map(&app, &state);
 
@@ -214,15 +206,7 @@ pub async fn stop_process(
         &format!("进程停止: {} (id: {})", cmd_display, id),
     );
 
-    let snapshot = {
-        let processes = state.processes.lock().unwrap();
-        processes.get(&id).cloned()
-    };
-    if let Some(entry) = snapshot {
-        let _ = app.emit("process-manager:status", entry);
-    }
-
-    Ok(())
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -234,17 +218,10 @@ pub fn remove_process(
     ensure_restored(&state)?;
     let entry = {
         let mut processes = state.processes.lock().unwrap();
+        let entry = processes.get_mut(&id).ok_or("进程不存在")?;
+        process_manager::stop_entry(entry)?;
         processes.remove(&id).ok_or("进程不存在")?
     };
-
-    if entry.status == "running" {
-        if let Some(pid) = entry.pid {
-            process_manager::kill_process_tree(pid);
-        }
-        if let Some(jh) = entry.job_handle {
-            process_manager::kill_job(HANDLE(jh as *mut _));
-        }
-    }
 
     process_manager::save_pid_map(&app, &state);
     save_definitions(&app, &state)?;
@@ -281,15 +258,7 @@ pub fn update_process(
     let entry = processes.get_mut(&id).ok_or("进程不存在")?;
 
     // Stop if running
-    if entry.status == "running" {
-        if let Some(pid) = entry.pid.take() {
-            process_manager::kill_process_tree(pid);
-        }
-        if let Some(jh) = entry.job_handle.take() {
-            process_manager::kill_job(HANDLE(jh as *mut _));
-        }
-        entry.status = "stopped".to_string();
-    }
+    process_manager::stop_entry(entry)?;
 
     let cmd_display = command.clone();
     entry.command = command;
@@ -300,11 +269,7 @@ pub fn update_process(
     entry.auto_restart = auto_restart;
 
     // Restart with new config
-    let (pid, job_handle, _, _) = process_manager::spawn_and_monitor(entry, &app)?;
-    entry.pid = Some(pid);
-    entry.job_handle = Some(job_handle.0 as isize);
-    entry.status = "running".to_string();
-    entry.started_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    process_manager::start_process(entry, &app)?;
 
     // Clone AFTER the entry reflects the running state, so the UI gets the
     // real pid/status instead of the pre-spawn (stopped/None) snapshot.
@@ -312,6 +277,7 @@ pub fn update_process(
     let _ = app.emit("process-manager:status", entry.clone());
 
     drop(processes);
+    process_manager::save_pid_map(&app, &state);
     save_definitions(&app, &state)?;
 
     state.logger.plugin(

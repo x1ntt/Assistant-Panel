@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Globe } from "lucide-vue-next";
 import { useGold, METAL_META } from "./composables/useGold";
 
-const { metals, stale, getThreshold } = useGold();
+const { metals, stale, lastError, updatedAtText, getThreshold } = useGold();
 
 // Merge live data with the fixed metal order so rows are stable.
 const rows = computed(() =>
@@ -44,7 +44,7 @@ const hasData = computed(() => metals.value.length > 0);
     <div class="flex items-center justify-between px-1.5 py-0.5">
       <div class="flex items-center gap-1.5">
         <Globe class="h-3.5 w-3.5 text-muted-foreground" />
-        <span class="text-xs text-muted-foreground font-medium">金价</span>
+        <span class="text-xs text-muted-foreground font-medium">金价 · V2</span>
       </div>
       <Badge
         variant="outline"
@@ -54,6 +54,13 @@ const hasData = computed(() => metals.value.length > 0);
         {{ stale ? "数据异常" : hasData ? "在线" : "等待" }}
       </Badge>
     </div>
+
+    <p class="px-1.5 text-[10px] text-muted-foreground tabular-nums" title="节点采集时间，按本地时区显示">
+      数据更新：{{ updatedAtText }}
+    </p>
+    <p v-if="lastError" class="px-1.5 text-[10px] text-yellow-600 dark:text-yellow-500 break-words">
+      {{ lastError }}
+    </p>
 
     <!-- Metal rows -->
     <div class="space-y-0.5">

@@ -170,7 +170,7 @@ pub struct ProcessEntry {
     pub status: String,
     pub started_at: Option<String>,
     #[serde(skip)]
-    pub job_handle: Option<isize>,
+    pub runtime: Option<std::sync::Arc<crate::modules::process_runtime::ProcessRuntime>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -25,6 +25,7 @@
 - [x] 主题切换 (亮/暗)
 - [x] 卡片拖拽排序 (持久化)
 - [x] 待办事项（两级任务、行内编辑、完成联动与可靠本地持久化）
+- [x] API 面板（PersonalApiV2 金价订阅、采集时间与阈值提醒）
 - [x] 退出按钮 (确认弹窗) + Alt+F4 屏蔽
 
 ## 开发
@@ -57,6 +58,14 @@ Tauri 开发模式通过 `beforeDevCommand` 启动 Vite（端口 1420）。正�
 `PROCESS_LIST_BLOCKED` 表示列表请求发生在未就绪或恢复失败时，`PROCESS_RESTORE_FAILED` 记录读取错误，`PROCESS_SAVE_BEGIN/OK/FAILED` 记录保存数量和结果。普通日志文件位于 `%LOCALAPPDATA%\com.administrator.assistant-panel\logs\启动时间\process-manager.log`；日志页面会排除 `diagnostics` 目录，避免把诊断目录误当作最新运行日志。
 
 进程管理前端回归测试：`node --test src/plugins/process-manager/composables/useProcessManager.test.mjs`。
+
+进程标准输出通过专用管道分别捕获 `stdout` 和 `stderr`，不会转发到启动面板的开发控制台。Python 的 `logging` 默认写入 `stderr`，展开进程条目或打开输出悬浮窗即可查看。Python 自动使用无缓冲和 UTF-8 输出；其他程序若自行缓存输出，需要在程序中刷新缓冲区。这是后台任务输出面板，不提供交互终端输入。
+
+每次启动都在执行用户代码前加入 Windows Job Object，状态监控和定期核对均查询整个进程组；启动器退出但其子进程仍运行时保持运行状态。停止、删除和修改命令会终止整个进程组。运行实例使用独立对象标识，旧监控线程不能覆盖新一次启动的状态，也不会因单次状态查询失败自动重复启动。新增、手动启动和编辑后重启都会更新 PID 映射。
+
+更新后需停止并重新启动原来的 Node 任务，让新版本创建并接管输出管道。重连一个已在运行的旧进程只能监控状态，无法补取或接管它原来的标准输出，会在输出区显示说明；历史输出只保存在当前应用运行期间的内存中。
+
+原生捕获和生命周期测试：`cargo test --manifest-path src-tauri/Cargo.toml --lib modules::process_runtime::tests -- --include-ignored`。该命令需要本机 Python，实际 `node.py` 测试还需要 `httpx`、`psutil`；可设置 `PROCESS_TEST_PYTHON` 指定解释器。测试启动真实子进程验证中文 stdout/stderr、带空格的参数与目录、启动器退出后的子进程、整组终止，并让仓库中的 Node 向本地模拟接口注册和回报，使用临时配置和测试 Key，不连接线上服务。
 
 ## 端口转发规则恢复
 
@@ -96,6 +105,18 @@ Tauri 开发模式通过 `beforeDevCommand` 启动 Vite（端口 1420）。正�
 - 删除父任务会同时删除全部子任务。未完成父任务需在按钮附近的浮层再次点击“删除”；再次点击原删除按钮、“取消”、**Esc** 或等待 4 秒可取消。确认时任务状态或子任务集合变化会更新提示并要求重新确认。已完成父任务、子任务直接删除。
 - 已保存数据位于 Tauri 的应用数据目录 `app_data_dir/todo.json`（Windows 默认 `%LOCALAPPDATA%\com.administrator.assistant-panel\todo.json`），独立于 Tauri Store。加载失败会显示错误与重试，不用空任务覆盖损坏文件；提交采用版本检查与同目录临时文件替换，失败保留已确认数据。
 - 删除采用 `deletedAt` 标记，界面隐藏但文件保留记录，不自动清理。稳定 ID、父引用、时间与删除标记只提供未来同步的数据基础；当前没有网络同步，`revision` 仅是本地提交序号，不是跨设备冲突协议。未来 API 仍需鉴权、服务端版本/游标、离线队列、冲突与删除清理策略。
+
+## API 面板：PersonalApiV2
+
+点击“API 面板”卡片的悬浮窗按钮，在“PersonalApiV2 连接设置”中填写新插件后台创建的用户 Key，保存即可连接，无需重启。默认地址为 `https://xint.top/index.php/action/personal-api-v2`，可改为自己的插件地址，地址不带查询参数。Key 不沿用旧服务，在本机 `settings.json` 的 `api-dashboard.connection` 中保存；输入框以密码形式显示。清空 Key 后保存会停止请求并清空显示的数据。
+
+后台统一请求 `GET <接口地址>?group=node&type=list&collectors=gold&client_id=<本机客户端ID>&ttl=120`，通过 `X-API-Key` 请求头认证，每轮完成后间隔 30 秒再次请求。配置保存后立即请求，也可点击“刷新”。只订阅 `gold`，不触发其他功能采集；即使面板收起仍续订，退出应用后订阅最多 120 秒自然过期。首次订阅可能需要等待 Node 下次轮询与采集，手动刷新只是重新读取服务端快照。Node 必须使用同一用户 Key 并启用 gold。
+
+主卡片和悬浮窗的“数据更新”显示 V2 `collected_at`，按电脑本地时区转换，表示节点实际采集时间。多节点时优先选未过期且在线的金价，再选采集时间较新的数据。过期、节点离线或请求失败时标记异常；请求失败保留上一份价格和原采集时间，重新打开窗口也保留异常状态。无历史数据时显示“暂无数据”。切换地址或 Key 会清空上一来源的数据与提醒状态，避免混用不同用户的数据。
+
+沿用黄金 9999、伦敦金两行及原有阈值设置（`api-dashboard.thresholds`）。只有有效、未过期的价格参与后台阈值提醒；前端按服务端 `max_age` 和采集/接收时间持续判断过期，不把客户端刷新时间当作数据更新时间。
+
+前端状态回归：`node --test src/plugins/api-dashboard/composables/useGold.test.mjs`。后端请求、解析与错误处理：`cargo test --manifest-path src-tauri/Cargo.toml modules::gold_monitor::tests`。
 
 ## 项目结构
 
