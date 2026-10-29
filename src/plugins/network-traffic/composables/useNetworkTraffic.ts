@@ -24,6 +24,7 @@ export function useNetworkTraffic() {
   let unlisten: UnlistenFn | null = null;
   let clock: ReturnType<typeof setInterval> | undefined;
   let connecting: Promise<void> | null = null;
+  let mutations: Promise<unknown> = Promise.resolve();
 
   function applySnapshot(next: Snapshot) {
     if (disposed || (snapshot.value && next.revision < snapshot.value.revision)) return;
@@ -62,19 +63,26 @@ export function useNetworkTraffic() {
   }
 
   async function mutate(command: string, args: Record<string, unknown>): Promise<boolean> {
-    if (disposed || busy.value) return false;
-    pending.value = true;
-    operationError.value = "";
-    try {
-      const result = await invoke<Snapshot>(command, args);
-      applySnapshot(result); // Backend owns ordering/highlight; no local cumulative arithmetic.
-      return !disposed;
-    } catch (e) {
-      if (!disposed) operationError.value = String(e);
-      return false;
-    } finally {
-      if (!disposed) pending.value = false;
-    }
+    if (disposed || loading.value || !snapshot.value) return false;
+    // Delayed single clicks on different rows may mature during another
+    // request. Serialize them rather than silently dropping a busy mutation.
+    const operation = mutations.then(async () => {
+      if (disposed) return false;
+      pending.value = true;
+      operationError.value = "";
+      try {
+        const result = await invoke<Snapshot>(command, args);
+        applySnapshot(result);
+        return !disposed;
+      } catch (e) {
+        if (!disposed) operationError.value = String(e);
+        return false;
+      } finally {
+        if (!disposed) pending.value = false;
+      }
+    });
+    mutations = operation;
+    return operation;
   }
 
   onMounted(() => {
@@ -92,6 +100,7 @@ export function useNetworkTraffic() {
     snapshot, rows, loading, error, operationError, pending, busy, stale,
     retry,
     pinInterface: (id: string) => mutate("pin_network_traffic_interface", { id }),
+    unpinInterface: (id: string) => mutate("pin_network_traffic_interface", { id, pinned: false }),
     setHighlight: (id: string, highlighted: boolean) =>
       mutate("set_network_traffic_highlight", { id, highlighted }),
   };

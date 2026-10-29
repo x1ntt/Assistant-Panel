@@ -253,6 +253,7 @@ pub fn run() {
             commands::todo::save_todo_document,
             commands::network_traffic::get_network_traffic_snapshot,
             commands::network_traffic::pin_network_traffic_interface,
+            commands::network_traffic::get_network_traffic_double_click_interval,
             commands::network_traffic::set_network_traffic_highlight,
             commands::network_traffic::set_network_traffic_enabled,
             commands::panel::toggle_panel,

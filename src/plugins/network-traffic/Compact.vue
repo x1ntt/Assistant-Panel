@@ -1,21 +1,35 @@
 <script setup lang="ts">
-import { computed, inject, onUnmounted, ref } from "vue";
-import { ChevronDown, ChevronUp, Highlighter, Pin, RotateCcw } from "lucide-vue-next";
+import { computed, inject, onMounted, onUnmounted, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { ChevronDown, ChevronUp, Highlighter, RotateCcw } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { CardHeaderKey } from "@/composables/cardHeader";
 import { formatBytes, formatSpeed } from "@/lib/network-format";
 import { useNetworkTraffic } from "./composables/useNetworkTraffic";
+import PinButton from "./PinButton.vue";
 import type { InterfaceMeta, TrafficRow } from "./types";
 
 const {
   snapshot, rows, loading, error, operationError, pending, busy, stale,
-  retry, pinInterface, setHighlight,
+  retry, pinInterface, unpinInterface, setHighlight,
 } = useNetworkTraffic();
+const doubleClickInterval = ref(500);
+onMounted(async () => {
+  try {
+    const interval = await invoke<number>("get_network_traffic_double_click_interval");
+    if (Number.isFinite(interval) && interval > 0 && interval <= 5000) doubleClickInterval.value = interval;
+  } catch (_) {}
+});
 const expanded = ref(false);
 const showFilters = ref(false);
 const filterCount = computed(() => rows.value.filter(row => row.isFilter).length);
 const displayRows = computed(() => showFilters.value ? rows.value : rows.value.filter(row => !row.isFilter));
-const visibleRows = computed(() => expanded.value ? displayRows.value : displayRows.value.slice(0, 3));
+const collapsedRows = computed(() => {
+  const pinned = displayRows.value.filter(row => row.pinned);
+  return pinned.length ? pinned : displayRows.value.slice(0, 1);
+});
+const hiddenCount = computed(() => displayRows.value.length - collapsedRows.value.length);
+const visibleRows = computed(() => expanded.value ? displayRows.value : collapsedRows.value);
 const count = computed(() => displayRows.value.length);
 const cardHeader = inject(CardHeaderKey, null);
 cardHeader?.register({ count });
@@ -83,7 +97,9 @@ async function retryAll() {
       </thead>
       <tbody>
         <tr v-for="row in visibleRows" :key="row.id" class="border-b border-border/50"
-          :class="row.highlighted ? 'bg-primary/10 hover:bg-primary/10' : 'hover:bg-accent/30'">
+          :class="row.highlighted
+            ? row.pinned ? 'bg-primary/15 hover:bg-primary/20' : 'bg-primary/10 hover:bg-primary/10'
+            : row.pinned ? 'bg-foreground/5 hover:bg-foreground/10' : 'hover:bg-accent/30'">
           <td class="px-1 py-0.5">
             <div class="flex items-center gap-1 min-w-0">
               <span class="w-0.5 self-stretch shrink-0" :class="row.highlighted ? 'bg-primary' : 'bg-transparent'" aria-hidden="true"></span>
@@ -112,11 +128,8 @@ async function retryAll() {
                 :aria-pressed="row.highlighted" :disabled="busy" @click="setHighlight(row.id, !row.highlighted)">
                 <Highlighter class="h-2.5 w-2.5" />
               </Button>
-              <Button variant="ghost" size="icon" class="h-4 w-4" :class="row.pinned ? 'text-primary' : ''"
-                :title="row.pinned ? '再次置顶' : '置顶'" :aria-label="row.pinned ? '再次置顶' : '置顶'"
-                :aria-pressed="row.pinned" :disabled="busy" @click="pinInterface(row.id)">
-                <Pin class="h-2.5 w-2.5" />
-              </Button>
+              <PinButton :pinned="row.pinned" :disabled="busy" :double-click-interval="doubleClickInterval"
+                @pin="pinInterface(row.id)" @unpin="unpinInterface(row.id)" />
             </div>
           </td>
         </tr>
@@ -127,12 +140,12 @@ async function retryAll() {
         </tr>
       </tbody>
     </table>
-    <div v-if="displayRows.length > 3" class="flex justify-center py-0.5">
+    <div v-if="hiddenCount > 0 || expanded" class="flex justify-center py-0.5">
       <Button variant="ghost" size="xs" class="h-5 text-[9px]" :aria-expanded="expanded"
         :aria-label="expanded ? '收起接口列表' : '展开全部接口'" @click="expanded = !expanded">
         <ChevronUp v-if="expanded" class="size-3" />
         <ChevronDown v-else class="size-3" />
-        {{ expanded ? '收起' : `展开其余 ${displayRows.length - 3} 条` }}
+        {{ expanded ? '收起' : `展开其余 ${hiddenCount} 条` }}
       </Button>
     </div>
     <p class="px-1 py-0.5 text-[8px] text-muted-foreground">↑发送 · ↓接收 · 流量自监控开始累计</p>

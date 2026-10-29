@@ -225,6 +225,17 @@ impl Monitor {
         self.migration_warning = None;
         Ok(())
     }
+
+    pub fn unpin<F>(&mut self, id: &str, save: F) -> Result<(), String>
+    where F: FnOnce(&[String]) -> Result<(), String> {
+        if let Some(error) = &self.config_error { return Err(error.clone()); }
+        if !self.tracked.contains_key(id) { return Err("Interface is not monitored".into()); }
+        let order: Vec<_> = self.pinned_order.iter().filter(|pinned| pinned.as_str() != id).cloned().collect();
+        save(&order)?;
+        self.pinned_order = order;
+        self.migration_warning = None;
+        Ok(())
+    }
 }
 
 pub struct NetworkTrafficState {
@@ -562,6 +573,45 @@ mod tests {
         assert!(restarted.snapshot().interfaces[0].pinned);
         assert!(restarted.snapshot().interfaces[1].pinned);
         assert!(!restarted.snapshot().interfaces[2].pinned);
+    }
+
+    #[test]
+    fn network_unpin_persists_other_pins_and_preserves_sampling_and_highlight() {
+        let mut m = Monitor::new(true, vec!["b".into(), "a".into()]);
+        let at = Instant::now();
+        tick(&mut m, at, 100, 200);
+        tick(&mut m, at + Duration::from_secs(1), 300, 500);
+        m.highlight("a", true).unwrap();
+        let before = m.snapshot().interfaces.into_iter().find(|row| row.id == "a").unwrap();
+        let mut disk = Vec::new();
+        m.unpin("a", |order| { disk = order.to_vec(); Ok(()) }).unwrap();
+        assert_eq!(disk, ["b"]);
+        let after = m.snapshot().interfaces.into_iter().find(|row| row.id == "a").unwrap();
+        assert!(!after.pinned);
+        assert!(after.highlighted);
+        assert_eq!(after.total_bytes_in, before.total_bytes_in);
+        assert_eq!(after.total_bytes_out, before.total_bytes_out);
+        assert_eq!(after.speed_in, before.speed_in);
+        assert_eq!(after.speed_out, before.speed_out);
+        let mut restarted = Monitor::new(true, disk);
+        restarted.discover(Ok(vec![interface("a"), interface("b")]));
+        assert!(restarted.snapshot().interfaces[0].pinned);
+        assert!(!restarted.snapshot().interfaces[1].pinned);
+    }
+
+    #[test]
+    fn network_unpin_failure_preserves_order_and_can_remove_the_last_pin() {
+        let mut m = Monitor::new(true, vec!["a".into()]);
+        m.discover(Ok(vec![interface("a"), interface("b")]));
+        assert!(m.unpin("a", |_| Err("disk denied".into())).is_err());
+        assert_eq!(m.pinned_order, ["a"]);
+        assert!(m.snapshot().interfaces[0].pinned);
+        assert!(m.unpin("unknown", |_| panic!("unknown interface must not save")).is_err());
+        m.unpin("a", |order| { assert!(order.is_empty()); Ok(()) }).unwrap();
+        assert!(m.snapshot().interfaces.iter().all(|row| !row.pinned));
+        m.unpin("a", |_| Ok(())).unwrap();
+        m.config_error = Some("bad settings".into());
+        assert!(m.unpin("a", |_| panic!("invalid settings must not save")).is_err());
     }
 
     #[test]

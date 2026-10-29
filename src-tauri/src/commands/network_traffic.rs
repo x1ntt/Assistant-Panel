@@ -97,16 +97,25 @@ pub async fn get_network_traffic_snapshot(app: AppHandle) -> Result<Snapshot, St
 }
 
 #[tauri::command]
-pub async fn pin_network_traffic_interface(app: AppHandle, id: String) -> Result<Snapshot, String> {
+pub async fn pin_network_traffic_interface(app: AppHandle, id: String, pinned: Option<bool>) -> Result<Snapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.try_state::<NetworkTrafficState>().ok_or_else(|| {
             crate::startup_diagnostics::record("NetworkTrafficState not ready; IPC rejected without panic");
             "Network traffic backend is not ready; retry shortly".to_string()
         })?;
         let mut monitor = state.inner.lock().map_err(|e| e.to_string())?;
-        monitor.pin(&id, |order| save_settings(&app, Some(order)))?;
+        if pinned.unwrap_or(true) {
+            monitor.pin(&id, |order| save_settings(&app, Some(order)))?;
+        } else {
+            monitor.unpin(&id, |order| save_settings(&app, Some(order)))?;
+        }
         Ok(monitor.publish(&app))
     }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn get_network_traffic_double_click_interval() -> u32 {
+    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }
 }
 
 #[tauri::command]

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, inject } from "vue";
 import { Button } from "@/components/ui/button";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import CellHint from "./CellHint.vue";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
@@ -189,6 +191,7 @@ function statusLabel(status: string) {
 </script>
 
 <template>
+  <TooltipProvider :delay-duration="350">
   <div class="w-full overflow-hidden">
     <div v-if="loading" class="py-1 text-[9px] text-muted-foreground" role="status">正在加载进程定义…</div>
     <div v-if="loadError" class="py-1 text-[9px] text-destructive" role="alert">
@@ -201,61 +204,79 @@ function statusLabel(status: string) {
     </div>
     <div v-if="mutationError" class="py-1 text-[9px] text-destructive" role="alert">{{ mutationError }}</div>
     <fieldset :disabled="!canModify" class="min-w-0 border-0 p-0 m-0">
-    <div class="overflow-x-auto">
-      <table class="w-full text-[9px] border-collapse">
+    <div class="w-full min-w-0">
+      <table class="w-full table-fixed text-[9px] border-collapse">
+        <colgroup>
+          <col />
+          <col />
+          <col class="w-9" />
+          <col class="w-9" />
+          <col class="w-16" />
+        </colgroup>
         <thead>
           <tr class="border-b border-border text-muted-foreground">
-            <th class="text-left px-1 py-0.5 font-medium">命令</th>
-            <th class="text-left px-1 py-0.5 font-medium">工作目录</th>
-            <th class="text-center px-1 py-0.5 font-medium">状态</th>
-            <th class="text-center px-1 py-0.5 font-medium">开机启动</th>
-            <th class="text-center px-1 py-0.5 font-medium">操作</th>
+            <CellHint text="命令"><th scope="col" class="truncate text-left px-1 py-0.5 font-medium">命令</th></CellHint>
+            <CellHint text="工作目录"><th scope="col" class="truncate text-left px-1 py-0.5 font-medium">工作目录</th></CellHint>
+            <CellHint text="状态"><th scope="col" class="truncate text-center px-1 py-0.5 font-medium">状态</th></CellHint>
+            <CellHint text="开机启动"><th scope="col" class="truncate text-center px-1 py-0.5 font-medium">开机启动</th></CellHint>
+            <CellHint text="操作"><th scope="col" class="sticky right-0 z-10 bg-background text-center px-1 py-0.5 font-medium">操作</th></CellHint>
           </tr>
         </thead>
         <tbody>
           <template v-for="p in processes" :key="p.id">
             <!-- Normal row -->
             <tr v-if="!p.editing" class="border-b border-border/50 hover:bg-accent/30">
-              <td class="px-1 py-0.5 font-mono">
+              <CellHint :text="p.command">
+              <td class="overflow-hidden px-1 py-0.5 font-mono">
                 <button
-                  class="flex items-center gap-0.5 max-w-full hover:text-primary"
+                  class="flex w-full min-w-0 items-center gap-0.5 overflow-hidden hover:text-primary"
+                  :aria-label="(p.expanded ? '收起' : '展开') + '进程：' + p.command"
                   @click="onToggleExpand(p)"
                 >
                   <ChevronDown v-if="p.expanded" class="h-2.5 w-2.5 shrink-0" />
                   <ChevronRight v-else class="h-2.5 w-2.5 shrink-0" />
-                  <span class="truncate">{{ p.command }}</span>
+                  <span class="min-w-0 truncate">{{ p.command }}</span>
                 </button>
               </td>
-              <td class="px-1 py-0.5 text-muted-foreground truncate max-w-[80px]">{{ p.workingDir || "." }}</td>
+              </CellHint>
+              <CellHint :text="p.workingDir || '.'">
+                <td class="px-1 py-0.5 text-muted-foreground truncate">{{ p.workingDir || "." }}</td>
+              </CellHint>
+              <CellHint :text="statusLabel(p.status)">
               <td class="px-1 py-0.5 text-center">
                 <Badge :variant="statusVariant(p.status)" class="text-[8px] px-0.5 py-0 h-3">
                   {{ statusLabel(p.status) }}
                 </Badge>
               </td>
+              </CellHint>
+              <CellHint :text="'开机启动：' + (p.autoStart ? '是' : '否')">
               <td class="px-1 py-0.5 text-center">
                 <span class="text-[8px]" :class="p.autoStart ? 'text-primary' : 'text-muted-foreground'">
                   {{ p.autoStart ? "是" : "否" }}
                 </span>
               </td>
-              <td class="px-1 py-0.5 text-center">
-                <div class="flex items-center justify-center gap-0.5">
+              </CellHint>
+              <CellHint :text="(p.status === 'running' ? '停止进程' : '启动进程') + ' · 编辑进程 · 删除进程'">
+              <td class="sticky right-0 z-10 bg-background px-1 py-0.5 text-center">
+                <div class="flex flex-nowrap items-center justify-center gap-0.5">
                   <Button v-if="p.status === 'running'" variant="ghost" size="icon"
-                    class="h-4 w-4 text-destructive" @click="stopProc(p.id)">
+                    class="h-4 w-4 shrink-0 text-destructive" title="停止进程" aria-label="停止进程" @click="stopProc(p.id)">
                     <Square class="h-2.5 w-2.5" />
                   </Button>
                   <Button v-else variant="ghost" size="icon"
-                    class="h-4 w-4 text-primary" @click="startProc(p.id)">
+                    class="h-4 w-4 shrink-0 text-primary" title="启动进程" aria-label="启动进程" @click="startProc(p.id)">
                     <Play class="h-2.5 w-2.5" />
                   </Button>
-                  <Button variant="ghost" size="icon" class="h-4 w-4" @click="startEdit(p)">
+                  <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0" title="编辑进程" aria-label="编辑进程" @click="startEdit(p)">
                     <Pencil class="h-2.5 w-2.5" />
                   </Button>
-                  <Button variant="ghost" size="icon" class="h-4 w-4 text-destructive"
+                  <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-destructive" title="删除进程" aria-label="删除进程"
                     @click="removeProc(p.id)">
                     <Trash2 class="h-2.5 w-2.5" />
                   </Button>
                 </div>
               </td>
+              </CellHint>
             </tr>
 
             <!-- Expanded detail row -->
@@ -322,7 +343,7 @@ function statusLabel(status: string) {
 
             <!-- Edit row -->
             <tr v-if="p.editing" class="border-b border-primary/30 bg-primary/5">
-              <td colspan="4" class="px-0.5 py-0.5">
+              <td colspan="4" class="overflow-hidden px-0.5 py-0.5">
                 <div class="flex flex-col gap-1">
                   <Input v-model="editData.command" class="h-5 text-[9px] px-1"
                     placeholder="命令 (如: python node.py)" />
@@ -342,14 +363,14 @@ function statusLabel(status: string) {
                   </div>
                 </div>
               </td>
-              <td class="px-0.5 py-0.5 text-center">
+              <td class="sticky right-0 z-10 bg-background px-0.5 py-0.5 text-center">
                 <div class="flex items-center justify-center gap-0.5">
                   <Button variant="ghost" size="icon" class="h-4 w-4 text-primary"
-                    @click="confirmEdit(p)">
+                    title="保存修改" aria-label="保存修改" @click="confirmEdit(p)">
                     <Check class="h-2.5 w-2.5" />
                   </Button>
                   <Button variant="ghost" size="icon" class="h-4 w-4"
-                    @click="cancelEdit(p)">
+                    title="取消修改" aria-label="取消修改" @click="cancelEdit(p)">
                     <X class="h-2.5 w-2.5" />
                   </Button>
                 </div>
@@ -359,7 +380,7 @@ function statusLabel(status: string) {
 
           <!-- Add row -->
           <tr v-if="showAddRow" class="border-b border-primary/30 bg-primary/5">
-            <td colspan="4" class="px-0.5 py-0.5">
+            <td colspan="4" class="overflow-hidden px-0.5 py-0.5">
               <div class="flex flex-col gap-1">
                 <Input v-model="newProc.command" class="h-5 text-[9px] px-1"
                   placeholder="命令 (如: python node.py)" />
@@ -379,12 +400,12 @@ function statusLabel(status: string) {
                 </div>
               </div>
             </td>
-            <td class="px-0.5 py-0.5 text-center">
+            <td class="sticky right-0 z-10 bg-background px-0.5 py-0.5 text-center">
               <div class="flex items-center justify-center gap-0.5">
-                <Button variant="ghost" size="icon" class="h-4 w-4 text-primary" @click="confirmAdd()">
+                <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0 text-primary" title="添加进程" aria-label="添加进程" @click="confirmAdd()">
                   <Check class="h-2.5 w-2.5" />
                 </Button>
-                <Button variant="ghost" size="icon" class="h-4 w-4" @click="cancelAdd()">
+                <Button variant="ghost" size="icon" class="h-4 w-4 shrink-0" title="取消添加" aria-label="取消添加" @click="cancelAdd()">
                   <X class="h-2.5 w-2.5" />
                 </Button>
               </div>
@@ -404,4 +425,5 @@ function statusLabel(status: string) {
     </div>
     </fieldset>
   </div>
+  </TooltipProvider>
 </template>
